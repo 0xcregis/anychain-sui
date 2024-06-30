@@ -17,7 +17,6 @@ derive_more = "0.99.17"
 bcs = "0.1.6"
 hex = "0.4.2"
 fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto", features = ["copy_key"], rev = "c101a5176799db3eb9c801b844e7add92153d291" }
-sui_sdk = { git = "https://github.com/mystenlabs/sui", package = "sui-sdk", rev = "f1a2d61bebdf83f01b58830e4768631bd28ce48a"}
 sui_types = { git = "https://github.com/mystenlabs/sui", package = "sui-types", rev = "f1a2d61bebdf83f01b58830e4768631bd28ce48a"}
 shared_crypto = { git = "https://github.com/mystenlabs/sui", package = "shared-crypto", rev = "f1a2d61bebdf83f01b58830e4768631bd28ce48a"}
 
