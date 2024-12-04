@@ -1,49 +1,30 @@
-use crate::{address::SuiAddress, format::SuiFormat, public_key::SuiKeyPair, SuiPublicKey};
-use anychain_core::{AddressError, Transaction, TransactionError, TransactionId};
-use fastcrypto::encoding::{Base58, Encoding};
+use crate::{address::SuiAddress, format::SuiFormat, public_key::SuiKeyPair, utils, SuiPublicKey};
+use anychain_core::{AddressError, PublicKey, Transaction, TransactionError, TransactionId};
+
+use fastcrypto::{encoding::{Base58, Encoding}, hash::{Blake2b256, Hash, HashFunction}};
 use shared_crypto::intent::{Intent, IntentMessage};
+use base64::engine::{Engine, general_purpose::STANDARD};
 use std::fmt::Display;
 use sui_types::{
-    base_types::{ObjectRef, SuiAddress as RawSuiAddress},
-    crypto::{default_hash, Signature as RawSignature},
-    transaction::TransactionData as RawSuiTransaction,
+    base_types::{ObjectID, ObjectRef, SuiAddress as RawSuiAddress}, crypto::{default_hash, Signature as RawSignature, ToFromBytes}, object::Object, transaction::TransactionData
 };
+use serde_json::{json, Value};
+use core::str::FromStr;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SuiTransactionParameters {
-    pub keypair: SuiKeyPair,
-    pub recipient: SuiAddress,
-    pub mist: u64,
+    pub from: SuiAddress,
+    pub to: SuiAddress,
+    pub amount: u64,
     pub gas_budget: u64,
     pub gas_price: u64,
-    pub gas_payment: ObjectRef,
-}
-
-impl SuiTransactionParameters {
-    pub fn new(
-        keypair: SuiKeyPair,
-        recipient: SuiAddress,
-        mist: u64,
-        gas_budget: u64,
-        gas_price: u64,
-        gas_payment: ObjectRef,
-    ) -> Self {
-        Self {
-            keypair,
-            recipient,
-            mist,
-            gas_budget,
-            gas_price,
-            gas_payment,
-        }
-    }
+    pub public_key: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
 pub struct SuiTransaction {
-    keypair: Option<SuiKeyPair>,
-    tx_data: RawSuiTransaction,
-    signature: Vec<u8>,
+    pub params: SuiTransactionParameters,
+    pub signature: Option<Vec<u8>>,
 }
 
 impl Transaction for SuiTransaction {
@@ -53,66 +34,72 @@ impl Transaction for SuiTransaction {
     type TransactionId = SuiTransactionId;
     type TransactionParameters = SuiTransactionParameters;
 
-    fn new(parameters: &Self::TransactionParameters) -> Result<Self, TransactionError> {
-        let sender = RawSuiAddress::from(&parameters.keypair.0.public());
-        let recipient =
-            RawSuiAddress::from_bytes(parameters.recipient.as_ref()).map_err(|err| {
-                TransactionError::AddressError(AddressError::InvalidAddress(format!(
-                    "Parse sui address failed: {}",
-                    err
-                )))
-            })?;
-
-        let tx_data = RawSuiTransaction::new_transfer_sui(
-            recipient,
-            sender,
-            Some(parameters.mist),
-            parameters.gas_payment,
-            parameters.gas_budget,
-            parameters.gas_price,
-        );
-
-        Ok(Self {
-            keypair: Some(parameters.keypair.clone()),
-            tx_data,
-            signature: vec![],
-        })
+    fn new(params: &Self::TransactionParameters) -> Result<Self, TransactionError> {
+        Ok(SuiTransaction { params: params.clone(), signature: None})
     }
 
-    fn sign(&mut self, _signature: Vec<u8>, _recid: u8) -> Result<Vec<u8>, TransactionError> {
-        let signature = RawSignature::new_secure(
-            &IntentMessage::new(Intent::sui_transaction(), &self.tx_data),
-            &self
-                .keypair
-                .as_ref()
-                .expect("Keypair is missing for signing transaction")
-                .0,
-        )
-        .as_ref()
-        .to_vec();
-
-        self.signature.clone_from(&signature);
-        Ok(signature)
-    }
-
-    fn from_bytes(transaction: &[u8]) -> Result<Self, TransactionError> {
-        Ok(Self {
-            keypair: None,
-            tx_data: bcs::from_bytes(transaction).map_err(|err| {
-                TransactionError::Message(format!("Deserialize transaction failed: {}", err))
-            })?,
-            signature: vec![],
-        })
+    fn sign(&mut self, rs: Vec<u8>, recid: u8) -> Result<Vec<u8>, TransactionError> {
+        if rs.len() != 64 {
+            return Err(TransactionError::Message(format!(
+                "Invalid signature length {}",
+                rs.len(),
+            )));
+        }
+        self.signature = Some(rs);
+        self.to_bytes()
     }
 
     fn to_bytes(&self) -> Result<Vec<u8>, TransactionError> {
-        bcs::to_bytes(&self.tx_data).map_err(|err| {
-            TransactionError::Message(format!("Serialize transaction failed: {}", err))
-        })
+        let from = self.params.from.to_raw();
+        
+        let object_id = "0xac8e32d0471a8fe650a809d5fb3dd8fc99b6c7202aa01455baaad9f9517c53ff";
+        let object_id = ObjectID::from_str(object_id)
+            .map_err(|e| TransactionError::Message(e.to_string()))?;
+        
+        let gas = Object::with_id_owner_for_testing(object_id, from)
+            .compute_object_reference();
+
+        let data = TransactionData::new_transfer_sui(
+            self.params.to.to_raw(),
+            from,
+            Some(self.params.amount),
+            gas,
+            self.params.gas_budget,
+            self.params.gas_price,
+        );
+
+        let raw_tx = bcs::to_bytes(&data)
+            .map_err(|e| TransactionError::Message(e.to_string()))?;
+
+        // let msg = IntentMessage::new(Intent::sui_transaction(), data);
+        // let raw_tx = bcs::to_bytes(&msg)
+        //     .map_err(|e| TransactionError::Message(e.to_string()))?;
+
+        match &self.signature {
+            Some(sig) => {
+                let flag = vec![0u8]; // 0 indicates ed25519 scheme
+                let pk = self.params.public_key.clone();
+                let sig = [flag, sig.clone(), pk].concat();
+
+                let raw_tx = STANDARD.encode(raw_tx);
+                let sig = STANDARD.encode(sig);
+
+                Ok(json!([raw_tx, sig]).to_string().as_bytes().to_vec())
+            }
+            None => Ok(raw_tx)
+        }
     }
 
-    fn to_transaction_id(&self) -> Result<Self::TransactionId, anychain_core::TransactionError> {
-        Ok(SuiTransactionId(default_hash(&self.tx_data)))
+    fn from_bytes(stream: &[u8]) -> Result<Self, TransactionError> {
+        todo!()
+    }
+
+    fn to_transaction_id(&self) -> Result<Self::TransactionId, TransactionError> {
+        let mut hasher = Blake2b256::new();
+        let bytes = self.to_bytes()?;
+        hasher.update(&bytes);
+        let hash = hasher.finalize().digest;
+        Ok(SuiTransactionId(hash))
     }
 }
 
@@ -123,75 +110,69 @@ impl TransactionId for SuiTransactionId {}
 
 impl Display for SuiTransactionId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", Base58::encode(self.0))
+        write!(f, "{}", hex::encode(self.0))
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::transaction::SuiTransactionParameters;
-    use anychain_core::Address;
-    use fastcrypto::{ed25519::Ed25519KeyPair, traits::ToFromBytes};
-    use std::str::FromStr;
-    use sui_types::{crypto::SuiKeyPair as RawSuiKeyPair, object::Object};
+#[test]
+fn test_object_id() {
+    let object_id = ObjectID::random();
+    println!("object_id: {}", object_id);
+}
 
-    use super::*;
-    use crate::SuiAddress;
+#[test]
+fn test() {
+    let flag = vec![0u8]; // 0 indicates ed25519 scheme
+    let format = &SuiFormat::Hex;
 
-    #[test]
-    fn test_tx_generation_one_sui_transfer() {
-        // Sender's keypair
-        let keypair_bytes = [
-            51, 95, 147, 235, 93, 221, 105, 227, 208, 198, 105, 132, 164, 28, 174, 83, 68, 231, 82,
-            133, 50, 67, 181, 184, 126, 93, 85, 244, 135, 108, 205, 101,
-        ];
-        let raw_alice_keypair =
-            RawSuiKeyPair::Ed25519(Ed25519KeyPair::from_bytes(&keypair_bytes).unwrap());
-        let alice_keypair = SuiKeyPair::from_raw(raw_alice_keypair);
-        let address_alice =
-            SuiAddress::from_public_key(&alice_keypair.pubkey(), &SuiFormat::Hex).unwrap();
+    let from_pk = [177, 212, 63, 234, 239, 192, 246, 9, 235, 235, 146, 97, 147, 205, 50, 42, 81, 190, 242, 142, 212, 247, 57, 84, 153, 89, 7, 172, 131, 208, 76, 118].to_vec();
+    let to_pk = [152, 185, 21, 134, 56, 146, 96, 192, 175, 224, 37, 105, 223, 59, 74, 27, 96, 178, 129, 249, 151, 151, 106, 53, 123, 20, 221, 212, 197, 205, 42, 86].to_vec();
+    
+    let from = [flag.clone(), from_pk.clone()].concat();
+    let to = [flag, to_pk].concat();
+    
+    let from = STANDARD.encode(from);
+    let to = STANDARD.encode(to);
 
-        // Recipient's address
-        let address_bob = SuiAddress::from_str(
-            "af306e86c74e937552df132b41a6cb3af58559f5342c6e82a98f7d1f7a4a9f30",
-        )
-        .unwrap();
+    let from = SuiPublicKey::from_str(&from).unwrap();
+    let to = SuiPublicKey::from_str(&to).unwrap();
 
-        // Transfer value, gas_budget, gas_price.
-        let sui_transfered = 1_000_000_000u64; // 1 SUI
-        let gas_budget = 3_000_000u64; // 0.003 SUI
-        let gas_price = 750u64; // 0.00000075 SUI
+    let from = from.to_address(format).unwrap();
+    let to = to.to_address(format).unwrap();
 
-        // Sender's balance object.
-        let gas_object = Object::with_owner_for_testing(address_alice.to_raw()); // 300_000 SUI
+    println!("from: {}\nto: {}", from, to);
 
-        // Construct transaction parameters
-        let params = SuiTransactionParameters::new(
-            alice_keypair,
-            address_bob,
-            sui_transfered,
-            gas_budget,
-            gas_price,
-            gas_object.compute_object_reference(),
-        );
+    let amount = 1000000000;
+    let gas_budget = 300000;
+    let gas_price = 750;
+    
+    let tx = SuiTransactionParameters {
+        from,
+        to,
+        amount,
+        gas_budget,
+        gas_price,
+        public_key: from_pk,
+    };
 
-        // Construct transaction by parameters
-        let mut transaction = SuiTransaction::new(&params).unwrap();
-        println!(
-            "transaction id: {}",
-            transaction.to_transaction_id().unwrap()
-        );
+    let mut tx = SuiTransaction::new(&tx).unwrap();
+    let txid = tx.to_transaction_id().unwrap();
 
-        // Sign the transaction
-        let res = transaction.sign(vec![], 0);
-        assert!(res.is_ok());
+    println!("txid: {}", txid);
 
-        // Serialize transaction
-        let tx_data = transaction.to_bytes().unwrap();
+    let r = "c78ca2036917b70b99ccfe2e30e5152693f8045f3a0d031cddd98f4e69563974";
+    let s = "e2b9f4d673b8b5ff37b62a6703a96ad6acb3c57f6cbc6a601056990e2c0c0105";
+    let recid = 0;
 
-        // Deserializ transaction
-        let deserialized_tx = SuiTransaction::from_bytes(&tx_data);
-        assert!(deserialized_tx.is_ok());
-        assert_eq!(transaction.tx_data, deserialized_tx.unwrap().tx_data);
-    }
+    let r = hex::decode(r).unwrap();
+    let s = hex::decode(s).unwrap();
+
+    let rs = [r, s].concat();
+
+    let tx = tx.sign(rs, recid).unwrap();
+    let tx = String::from_utf8(tx).unwrap();
+
+    let tx = serde_json::from_str::<Value>(&tx).unwrap();
+
+    println!("{}", tx);
 }
