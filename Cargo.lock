@@ -239,6 +239,8 @@ dependencies = [
  "anychain-core",
  "base64 0.22.1",
  "bcs",
+ "bech32",
+ "bs58 0.5.1",
  "derive_more",
  "fastcrypto",
  "hex",
