@@ -1,7 +1,7 @@
 [package]
 name = "anychain-sui"
 description = "A Rust library for Sui-focused cryptocurrency wallets, enabling seamless transactions on the Sui blockchain"
-version = "0.1.0"
+version = "0.1.1"
 keywords = ["sui", "blockchain", "cryptocurrency", "wallet", "transactions"]
 edition = "2021"
 homepage = "https://www.cregis.com"
@@ -19,6 +19,10 @@ hex = "0.4.2"
 fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto", features = ["copy_key"], rev = "c101a5176799db3eb9c801b844e7add92153d291" }
 sui_types = { git = "https://github.com/mystenlabs/sui", package = "sui-types", rev = "f1a2d61bebdf83f01b58830e4768631bd28ce48a"}
 shared_crypto = { git = "https://github.com/mystenlabs/sui", package = "shared-crypto", rev = "f1a2d61bebdf83f01b58830e4768631bd28ce48a"}
+base64 = "0.22.1"
+serde_json = "1.0.133"
+bs58 = "0.5.1"
+bech32 = "0.9.0"
 
 [dev-dependencies]
 rand = { version = "0.8.5" }
