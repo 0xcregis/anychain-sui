@@ -6,7 +6,7 @@ use base64::engine::{Engine, general_purpose::STANDARD};
 use shared_crypto::intent::{Intent, IntentMessage};
 use std::fmt::Display;
 use sui_types::{
-    base_types::ObjectID, crypto::{Signer, ToFromBytes}, object::Object, transaction::TransactionData
+    base_types::{ObjectID, ObjectRef, SequenceNumber}, crypto::{Signer, ToFromBytes}, digests::ObjectDigest, object::Object, transaction::TransactionData
 };
 use serde_json::{json, Value};
 use core::str::FromStr;
@@ -16,8 +16,11 @@ pub struct SuiTransactionParameters {
     pub from: SuiAddress,
     pub to: SuiAddress,
     pub amount: u64,
-    pub gas_budget: u64,
     pub gas_price: u64,
+    pub gas_budget: u64,
+    pub coin_id: String,
+    pub version: u64,
+    pub digest: String,
     pub public_key: Vec<u8>,
 }
 
@@ -52,18 +55,17 @@ impl Transaction for SuiTransaction {
     fn to_bytes(&self) -> Result<Vec<u8>, TransactionError> {
         let from = self.params.from.to_raw();
         
-        let object_id = "0xac8e32d0471a8fe650a809d5fb3dd8fc99b6c7202aa01455baaad9f9517c53ff";
-        let object_id = ObjectID::from_str(object_id)
+        let object_id = ObjectID::from_str(&self.params.coin_id)
             .map_err(|e| TransactionError::Message(e.to_string()))?;
-        
-        let gas = Object::with_id_owner_for_testing(object_id, from)
-            .compute_object_reference();
+        let sequence = SequenceNumber::from_u64(self.params.version);
+        let digest = ObjectDigest::from_str(&self.params.digest)
+            .map_err(|e| TransactionError::Message(e.to_string()))?;
 
         let data = TransactionData::new_transfer_sui(
             self.params.to.to_raw(),
             from,
             Some(self.params.amount),
-            gas,
+            (object_id, sequence, digest),
             self.params.gas_budget,
             self.params.gas_price,
         );
@@ -80,7 +82,12 @@ impl Transaction for SuiTransaction {
                 let raw_tx = STANDARD.encode(raw_tx);
                 let sig = STANDARD.encode(sig);
 
-                Ok(json!([raw_tx, sig]).to_string().as_bytes().to_vec())
+                let ret = json!({
+                    "raw_tx": raw_tx,
+                    "signature": sig,
+                });
+
+                Ok(ret.to_string().as_bytes().to_vec())
             }
             None => {
                 let msg = IntentMessage::new(Intent::sui_transaction(), data);
@@ -116,12 +123,6 @@ impl Display for SuiTransactionId {
 }
 
 #[test]
-fn test_object_id() {
-    let object_id = ObjectID::random();
-    println!("object_id: {}", object_id);
-}
-
-#[test]
 fn test_tx() {
     let sk_from = "suiprivkey1qzjx78cfcqww8prl6cw569rgz3v095a5qc3kae93374nhn23r9w0xqh7628";
     let sk_to = "suiprivkey1qz4geqyqpa83waxmnf2vr80qemktms0gzthy5r07j4naaettnvwpkf6swws";
@@ -132,16 +133,24 @@ fn test_tx() {
     println!("from: {}\nto: {}", from, to);
 
     let amount = 1000000000;
-    let gas_budget = 300000;
-    let gas_price = 750;
+    let gas_budget = 5000000;
+    let gas_price = 1250;
+
+    let coin_id = "0x257bd81166028d49e27261eef408d860ff39542ee12c11595b6bca3a8e26e753".to_string();
+    let version = 37;
+    let digest = "4TR1LKd3yRJaZSBuLX8QBb3hCHG5JDitQraWWx32jyHz".to_string();
+
     let public_key = sk_to_pk(sk_from);
     
     let tx = SuiTransactionParameters {
         from,
         to,
         amount,
-        gas_budget,
         gas_price,
+        gas_budget,
+        coin_id,
+        version,
+        digest,
         public_key,
     };
 
