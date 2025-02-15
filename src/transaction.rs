@@ -38,13 +38,19 @@ impl Coin {
 
 #[derive(Debug, Clone)]
 pub struct SuiTransactionParameters {
-    pub tokens: Vec<Coin>,
+    // suix_getCoins(from, token_type)
+    pub tokens: Vec<Coin>, 
+    
     pub from: SuiAddress,
     pub to: SuiAddress,
     pub amount: u64,
     pub gas_price: u64,
     pub gas_budget: u64,
+    
+    // suix_getCoins(from, "0x2::sui::SUI")
+    // or suix_getCoins(from)
     pub gas_payment: Coin,
+    
     pub public_key: Vec<u8>,
 }
 
