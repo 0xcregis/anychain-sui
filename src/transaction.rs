@@ -1,7 +1,11 @@
 use crate::{address::SuiAddress, format::SuiFormat, SuiPrivateKey, SuiPublicKey};
 use anychain_core::{Address, Transaction, TransactionError, TransactionId};
 
-use fastcrypto::{ed25519::{Ed25519KeyPair, Ed25519PrivateKey, Ed25519Signature}, hash::{Blake2b256, HashFunction}, traits::KeyPair};
+use fastcrypto::{
+    ed25519::{Ed25519KeyPair, Ed25519PrivateKey, Ed25519Signature},
+    hash::{Blake2b256, HashFunction},
+    traits::KeyPair,
+};
 use base64::engine::{Engine, general_purpose::STANDARD};
 use shared_crypto::intent::{Intent, IntentMessage};
 use std::fmt::Display;
@@ -9,7 +13,6 @@ use sui_types::{
     base_types::{ObjectID, ObjectRef, SequenceNumber},
     crypto::{Signer, ToFromBytes},
     digests::ObjectDigest,
-    object::Object,
     transaction::TransactionData,
 };
 use serde_json::{json, Value};
@@ -75,15 +78,20 @@ impl Transaction for SuiTransaction {
 
     fn to_bytes(&self) -> Result<Vec<u8>, TransactionError> {
         let from = self.params.from.to_raw();
+        let to = self.params.to.to_raw();
+        let amount = self.params.amount;
+        let gas = self.params.gas_payment.to_object_ref()?;
+        let gas_budget = self.params.gas_budget;
+        let gas_price = self.params.gas_price;
 
         let data = if self.params.tokens.is_empty() {
             TransactionData::new_transfer_sui(
-                self.params.to.to_raw(),
+                to,
                 from,
-                Some(self.params.amount),
-                self.params.gas_payment.to_object_ref()?,
-                self.params.gas_budget,
-                self.params.gas_price,
+                Some(amount),
+                gas,
+                gas_budget,
+                gas_price,
             )
         } else {
             let coins: Vec<ObjectRef> = self.params.tokens.iter().map(
@@ -93,11 +101,11 @@ impl Transaction for SuiTransaction {
             TransactionData::new_pay(
                 from,
                 coins,
-                vec![self.params.to.to_raw()],
-                vec![self.params.amount],
-                self.params.gas_payment.to_object_ref()?,
-                self.params.gas_budget,
-                self.params.gas_price
+                vec![to],
+                vec![amount],
+                gas,
+                gas_budget,
+                gas_price,
             ).map_err(|e| TransactionError::Message(e.to_string()))?
         };
 
