@@ -77,6 +77,7 @@ impl Transaction for SuiTransaction {
     }
 
     fn to_bytes(&self) -> Result<Vec<u8>, TransactionError> {
+        let tokens = &self.params.tokens;
         let from = self.params.from.to_raw();
         let to = self.params.to.to_raw();
         let amount = self.params.amount;
@@ -84,7 +85,7 @@ impl Transaction for SuiTransaction {
         let gas_budget = self.params.gas_budget;
         let gas_price = self.params.gas_price;
 
-        let data = if self.params.tokens.is_empty() {
+        let data = if tokens.is_empty() {
             TransactionData::new_transfer_sui(
                 to,
                 from,
@@ -94,7 +95,7 @@ impl Transaction for SuiTransaction {
                 gas_price,
             )
         } else {
-            let coins: Vec<ObjectRef> = self.params.tokens.iter().map(
+            let coins: Vec<ObjectRef> = tokens.iter().map(
                 |token| token.to_object_ref().unwrap()
             ).collect();
 
