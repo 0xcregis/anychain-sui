@@ -101,9 +101,12 @@ impl Transaction for SuiTransaction {
                 gas_price,
             )
         } else {
-            let coins: Vec<ObjectRef> = tokens.iter().map(
-                |token| token.to_object_ref().unwrap()
-            ).collect();
+            let mut coins = vec![];
+
+            for token in tokens {
+                let token = token.to_object_ref()?;
+                coins.push(token);
+            }
 
             TransactionData::new_pay(
                 from,
