@@ -21,7 +21,6 @@ pub const SUI_ADDRESS_LENGTH: usize = 32;
 #[derive(
     Eq, Default, PartialEq, Ord, PartialOrd, Copy, Clone, Hash, Serialize, Deserialize, JsonSchema,
 )]
-#[cfg_attr(feature = "fuzzing", derive(proptest_derive::Arbitrary))]
 pub struct SuiAddress(
     #[schemars(with = "Hex")]
     #[serde_as(as = "Readable<Hex, _>")]

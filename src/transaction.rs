@@ -1,26 +1,56 @@
 use crate::{address::SuiAddress, format::SuiFormat, SuiPrivateKey, SuiPublicKey};
 use anychain_core::{Address, Transaction, TransactionError, TransactionId};
 
-use fastcrypto::{ed25519::{Ed25519KeyPair, Ed25519PrivateKey, Ed25519Signature}, hash::{Blake2b256, HashFunction}, traits::KeyPair};
+use fastcrypto::{
+    ed25519::{Ed25519KeyPair, Ed25519PrivateKey, Ed25519Signature},
+    hash::{Blake2b256, HashFunction},
+    traits::KeyPair,
+};
 use base64::engine::{Engine, general_purpose::STANDARD};
 use shared_crypto::intent::{Intent, IntentMessage};
 use std::fmt::Display;
 use sui_types::{
-    base_types::{ObjectID, ObjectRef, SequenceNumber}, crypto::{Signer, ToFromBytes}, digests::ObjectDigest, object::Object, transaction::TransactionData
+    base_types::{ObjectID, ObjectRef, SequenceNumber},
+    crypto::{Signer, ToFromBytes},
+    digests::ObjectDigest,
+    transaction::TransactionData,
 };
 use serde_json::{json, Value};
 use core::str::FromStr;
 
 #[derive(Debug, Clone)]
+pub struct Coin {
+    pub id: String,
+    pub version: u64,
+    pub digest: String,
+}
+
+impl Coin {
+    pub fn to_object_ref(&self) -> Result<(ObjectID, SequenceNumber, ObjectDigest), TransactionError> {
+        let object_id = ObjectID::from_str(&self.id)
+            .map_err(|e| TransactionError::Message(e.to_string()))?;
+        let sequence = SequenceNumber::from_u64(self.version);
+        let digest = ObjectDigest::from_str(&self.digest)
+            .map_err(|e| TransactionError::Message(e.to_string()))?;
+        Ok((object_id, sequence, digest))
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct SuiTransactionParameters {
+    // suix_getCoins(from, token_type)
+    pub tokens: Vec<Coin>, 
+    
     pub from: SuiAddress,
     pub to: SuiAddress,
     pub amount: u64,
     pub gas_price: u64,
     pub gas_budget: u64,
-    pub coin_id: String,
-    pub version: u64,
-    pub digest: String,
+    
+    // suix_getCoins(from, "0x2::sui::SUI")
+    // or suix_getCoins(from)
+    pub gas_payment: Coin,
+    
     pub public_key: Vec<u8>,
 }
 
@@ -53,22 +83,41 @@ impl Transaction for SuiTransaction {
     }
 
     fn to_bytes(&self) -> Result<Vec<u8>, TransactionError> {
+        let tokens = &self.params.tokens;
         let from = self.params.from.to_raw();
-        
-        let object_id = ObjectID::from_str(&self.params.coin_id)
-            .map_err(|e| TransactionError::Message(e.to_string()))?;
-        let sequence = SequenceNumber::from_u64(self.params.version);
-        let digest = ObjectDigest::from_str(&self.params.digest)
-            .map_err(|e| TransactionError::Message(e.to_string()))?;
+        let to = self.params.to.to_raw();
+        let amount = self.params.amount;
+        let gas = self.params.gas_payment.to_object_ref()?;
+        let gas_budget = self.params.gas_budget;
+        let gas_price = self.params.gas_price;
 
-        let data = TransactionData::new_transfer_sui(
-            self.params.to.to_raw(),
-            from,
-            Some(self.params.amount),
-            (object_id, sequence, digest),
-            self.params.gas_budget,
-            self.params.gas_price,
-        );
+        let data = if tokens.is_empty() {
+            TransactionData::new_transfer_sui(
+                to,
+                from,
+                Some(amount),
+                gas,
+                gas_budget,
+                gas_price,
+            )
+        } else {
+            let mut coins = vec![];
+
+            for token in tokens {
+                let token = token.to_object_ref()?;
+                coins.push(token);
+            }
+
+            TransactionData::new_pay(
+                from,
+                coins,
+                vec![to],
+                vec![amount],
+                gas,
+                gas_budget,
+                gas_price,
+            ).map_err(|e| TransactionError::Message(e.to_string()))?
+        };
 
         match &self.signature {
             Some(sig) => {
@@ -142,15 +191,20 @@ fn test_tx() {
 
     let public_key = sk_to_pk(sk_from);
     
+    let gas_payment = Coin {
+        id: coin_id,
+        version,
+        digest,
+    };
+
     let tx = SuiTransactionParameters {
+        tokens: vec![],
         from,
         to,
         amount,
         gas_price,
         gas_budget,
-        coin_id,
-        version,
-        digest,
+        gas_payment,
         public_key,
     };
 
