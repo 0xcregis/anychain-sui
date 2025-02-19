@@ -1,34 +1,42 @@
 use crate::{address::SuiAddress, format::SuiFormat, SuiPrivateKey, SuiPublicKey};
 use anychain_core::{Address, Transaction, TransactionError, TransactionId};
 
+use base64::engine::{general_purpose::STANDARD, Engine};
+use core::str::FromStr;
 use fastcrypto::{
     ed25519::{Ed25519KeyPair, Ed25519PrivateKey, Ed25519Signature},
     hash::{Blake2b256, HashFunction},
     traits::KeyPair,
 };
-use base64::engine::{Engine, general_purpose::STANDARD};
+use serde_json::json;
 use shared_crypto::intent::{Intent, IntentMessage};
 use std::fmt::Display;
 use sui_types::{
-    base_types::{ObjectID, ObjectRef, SequenceNumber},
+    base_types::{ObjectID, SequenceNumber},
     crypto::{Signer, ToFromBytes},
     digests::ObjectDigest,
     transaction::TransactionData,
 };
-use serde_json::{json, Value};
-use core::str::FromStr;
 
 #[derive(Debug, Clone)]
-pub struct Coin {
+pub struct Input {
     pub id: String,
     pub version: u64,
     pub digest: String,
 }
 
-impl Coin {
-    pub fn to_object_ref(&self) -> Result<(ObjectID, SequenceNumber, ObjectDigest), TransactionError> {
-        let object_id = ObjectID::from_str(&self.id)
-            .map_err(|e| TransactionError::Message(e.to_string()))?;
+#[derive(Debug, Clone)]
+pub struct Output {
+    pub to: SuiAddress,
+    pub amount: u64,
+}
+
+impl Input {
+    pub fn to_object_ref(
+        &self,
+    ) -> Result<(ObjectID, SequenceNumber, ObjectDigest), TransactionError> {
+        let object_id =
+            ObjectID::from_str(&self.id).map_err(|e| TransactionError::Message(e.to_string()))?;
         let sequence = SequenceNumber::from_u64(self.version);
         let digest = ObjectDigest::from_str(&self.digest)
             .map_err(|e| TransactionError::Message(e.to_string()))?;
@@ -38,19 +46,13 @@ impl Coin {
 
 #[derive(Debug, Clone)]
 pub struct SuiTransactionParameters {
-    // suix_getCoins(from, token_type)
-    pub tokens: Vec<Coin>, 
-    
     pub from: SuiAddress,
-    pub to: SuiAddress,
-    pub amount: u64,
+    // suix_getCoins(from, token_type)
+    pub inputs: Vec<Input>,
+    pub outputs: Vec<Output>,
+    pub gas_payment: Input,
     pub gas_price: u64,
     pub gas_budget: u64,
-    
-    // suix_getCoins(from, "0x2::sui::SUI")
-    // or suix_getCoins(from)
-    pub gas_payment: Coin,
-    
     pub public_key: Vec<u8>,
 }
 
@@ -68,7 +70,10 @@ impl Transaction for SuiTransaction {
     type TransactionParameters = SuiTransactionParameters;
 
     fn new(params: &Self::TransactionParameters) -> Result<Self, TransactionError> {
-        Ok(SuiTransaction { params: params.clone(), signature: None})
+        Ok(SuiTransaction {
+            params: params.clone(),
+            signature: None,
+        })
     }
 
     fn sign(&mut self, rs: Vec<u8>, _: u8) -> Result<Vec<u8>, TransactionError> {
@@ -83,41 +88,36 @@ impl Transaction for SuiTransaction {
     }
 
     fn to_bytes(&self) -> Result<Vec<u8>, TransactionError> {
-        let tokens = &self.params.tokens;
         let from = self.params.from.to_raw();
-        let to = self.params.to.to_raw();
-        let amount = self.params.amount;
-        let gas = self.params.gas_payment.to_object_ref()?;
+
+        let gas_payment = self.params.gas_payment.to_object_ref()?;
         let gas_budget = self.params.gas_budget;
         let gas_price = self.params.gas_price;
 
-        let data = if tokens.is_empty() {
-            TransactionData::new_transfer_sui(
-                to,
-                from,
-                Some(amount),
-                gas,
-                gas_budget,
-                gas_price,
-            )
-        } else {
-            let mut coins = vec![];
+        let mut coins = vec![];
+        let mut recipients = vec![];
+        let mut amounts = vec![];
 
-            for token in tokens {
-                let token = token.to_object_ref()?;
-                coins.push(token);
-            }
+        for input in &self.params.inputs {
+            let coin = input.to_object_ref()?;
+            coins.push(coin);
+        }
 
-            TransactionData::new_pay(
-                from,
-                coins,
-                vec![to],
-                vec![amount],
-                gas,
-                gas_budget,
-                gas_price,
-            ).map_err(|e| TransactionError::Message(e.to_string()))?
-        };
+        for output in &self.params.outputs {
+            recipients.push(output.to.to_raw());
+            amounts.push(output.amount);
+        }
+
+        let data = TransactionData::new_pay(
+            from,
+            coins,
+            recipients,
+            amounts,
+            gas_payment,
+            gas_budget,
+            gas_price,
+        )
+        .map_err(|e| TransactionError::Message(e.to_string()))?;
 
         match &self.signature {
             Some(sig) => {
@@ -125,8 +125,8 @@ impl Transaction for SuiTransaction {
                 let pk = self.params.public_key.clone();
                 let sig = [flag, sig.clone(), pk].concat();
 
-                let raw_tx = bcs::to_bytes(&data)
-                    .map_err(|e| TransactionError::Message(e.to_string()))?;
+                let raw_tx =
+                    bcs::to_bytes(&data).map_err(|e| TransactionError::Message(e.to_string()))?;
 
                 let raw_tx = STANDARD.encode(raw_tx);
                 let sig = STANDARD.encode(sig);
@@ -140,8 +140,8 @@ impl Transaction for SuiTransaction {
             }
             None => {
                 let msg = IntentMessage::new(Intent::sui_transaction(), data);
-                let msg = bcs::to_bytes(&msg)
-                    .map_err(|e| TransactionError::Message(e.to_string()))?;
+                let msg =
+                    bcs::to_bytes(&msg).map_err(|e| TransactionError::Message(e.to_string()))?;
                 Ok(msg)
             }
         }
@@ -171,83 +171,89 @@ impl Display for SuiTransactionId {
     }
 }
 
-#[test]
-fn test_tx() {
-    let sk_from = "suiprivkey1qzjx78cfcqww8prl6cw569rgz3v095a5qc3kae93374nhn23r9w0xqh7628";
-    let sk_to = "suiprivkey1qz4geqyqpa83waxmnf2vr80qemktms0gzthy5r07j4naaettnvwpkf6swws";
+mod tests {
+    use super::*;
+    use serde_json::Value;
 
-    let from = sk_to_addr(sk_from);
-    let to = sk_to_addr(sk_to);
+    #[test]
+    fn test_tx() {
+        let sk_from = "suiprivkey1qzjx78cfcqww8prl6cw569rgz3v095a5qc3kae93374nhn23r9w0xqh7628";
+        let sk_to = "suiprivkey1qz4geqyqpa83waxmnf2vr80qemktms0gzthy5r07j4naaettnvwpkf6swws";
 
-    println!("from: {}\nto: {}", from, to);
+        let from = sk_to_addr(sk_from);
+        let to = sk_to_addr(sk_to);
 
-    let amount = 1000000000;
-    let gas_budget = 5000000;
-    let gas_price = 1250;
+        println!("from: {}\nto: {}", from, to);
 
-    let coin_id = "0x257bd81166028d49e27261eef408d860ff39542ee12c11595b6bca3a8e26e753".to_string();
-    let version = 37;
-    let digest = "4TR1LKd3yRJaZSBuLX8QBb3hCHG5JDitQraWWx32jyHz".to_string();
+        let amount = 1000000000;
+        let gas_budget = 5000000;
+        let gas_price = 1250;
 
-    let public_key = sk_to_pk(sk_from);
-    
-    let gas_payment = Coin {
-        id: coin_id,
-        version,
-        digest,
-    };
+        let coin_id = "0x257bd81166028d49e27261eef408d860ff39542ee12c11595b6bca3a8e26e753".to_string();
+        let version = 37;
+        let digest = "4TR1LKd3yRJaZSBuLX8QBb3hCHG5JDitQraWWx32jyHz".to_string();
 
-    let tx = SuiTransactionParameters {
-        tokens: vec![],
-        from,
-        to,
-        amount,
-        gas_price,
-        gas_budget,
-        gas_payment,
-        public_key,
-    };
+        let public_key = sk_to_pk(sk_from);
 
-    let mut tx = SuiTransaction::new(&tx).unwrap();
-    
-    let txid = tx.to_transaction_id().unwrap().0.to_vec();
-    let sig = sk_sign(sk_from, &txid);
+        let coin = Input {
+            id: coin_id,
+            version,
+            digest,
+        };
 
-    let tx = tx.sign(sig, 0).unwrap();
-    let tx = String::from_utf8(tx).unwrap();
+        let output = Output { to, amount };
 
-    let tx = serde_json::from_str::<Value>(&tx).unwrap();
+        let tx = SuiTransactionParameters {
+            from,
+            inputs: vec![coin.clone()],
+            outputs: vec![output],
+            gas_payment: coin,
+            gas_price,
+            gas_budget,
+            public_key,
+        };
 
-    println!("{}", tx);
-}
+        let mut tx = SuiTransaction::new(&tx).unwrap();
 
-use bech32::FromBase32;
+        let txid = tx.to_transaction_id().unwrap().0.to_vec();
+        let sig = sk_sign(sk_from, &txid);
 
-fn sk_to_addr(sk: &str) -> SuiAddress {
-    let (_, data, _) = bech32::decode(sk).unwrap();
-    let data = Vec::from_base32(&data).unwrap();
-    let sk = Ed25519PrivateKey::from_bytes(&data[1..]).unwrap();
-    let sk = SuiPrivateKey::Ed25519(sk);
-    let addr = SuiAddress::from_secret_key(&sk, &SuiFormat::Hex).unwrap();
-    addr
-}
+        let tx = tx.sign(sig, 0).unwrap();
+        let tx = String::from_utf8(tx).unwrap();
 
-fn sk_to_pk(sk: &str) -> Vec<u8> {
-    let (_, data, _) = bech32::decode(sk).unwrap();
-    let data = Vec::from_base32(&data).unwrap();
-    let sk = Ed25519PrivateKey::from_bytes(&data[1..]).unwrap();
-    let keypair = Ed25519KeyPair::from(sk);
-    let pk = keypair.public();
-    let pk = pk.as_bytes();
-    pk.to_vec()
-}
+        let tx = serde_json::from_str::<Value>(&tx).unwrap();
 
-fn sk_sign(sk: &str, msg: &[u8]) -> Vec<u8> {
-    let (_, data, _) = bech32::decode(sk).unwrap();
-    let data = Vec::from_base32(&data).unwrap();
-    let sk = Ed25519PrivateKey::from_bytes(&data[1..]).unwrap();
-    let keypair = Ed25519KeyPair::from(sk);
-    let sig: Ed25519Signature = keypair.sign(msg);
-    let sig = sig.sig.to_bytes().to_vec();
-    sig
+        println!("{}", tx);
+    }
+
+    use bech32::FromBase32;
+
+    fn sk_to_addr(sk: &str) -> SuiAddress {
+        let (_, data, _) = bech32::decode(sk).unwrap();
+        let data = Vec::from_base32(&data).unwrap();
+        let sk = Ed25519PrivateKey::from_bytes(&data[1..]).unwrap();
+        let sk = SuiPrivateKey::Ed25519(sk);
+        let addr = SuiAddress::from_secret_key(&sk, &SuiFormat::Hex).unwrap();
+        addr
+    }
+
+    fn sk_to_pk(sk: &str) -> Vec<u8> {
+        let (_, data, _) = bech32::decode(sk).unwrap();
+        let data = Vec::from_base32(&data).unwrap();
+        let sk = Ed25519PrivateKey::from_bytes(&data[1..]).unwrap();
+        let keypair = Ed25519KeyPair::from(sk);
+        let pk = keypair.public();
+        let pk = pk.as_bytes();
+        pk.to_vec()
+    }
+
+    fn sk_sign(sk: &str, msg: &[u8]) -> Vec<u8> {
+        let (_, data, _) = bech32::decode(sk).unwrap();
+        let data = Vec::from_base32(&data).unwrap();
+        let sk = Ed25519PrivateKey::from_bytes(&data[1..]).unwrap();
+        let keypair = Ed25519KeyPair::from(sk);
+        let sig: Ed25519Signature = keypair.sign(msg);
+        let sig = sig.sig.to_bytes().to_vec();
+        sig
+    }
 }
