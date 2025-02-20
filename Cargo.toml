@@ -1,7 +1,7 @@
 [package]
 name = "anychain-sui"
 description = "A Rust library for Sui-focused cryptocurrency wallets, enabling seamless transactions on the Sui blockchain"
-version = "0.1.3"
+version = "0.1.4"
 keywords = ["sui", "blockchain", "cryptocurrency", "wallet", "transactions"]
 edition = "2021"
 homepage = "https://www.cregis.com"
