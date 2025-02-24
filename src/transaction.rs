@@ -8,14 +8,16 @@ use fastcrypto::{
     hash::{Blake2b256, HashFunction},
     traits::KeyPair,
 };
-use serde_json::json;
+use serde_json::{from_str, json, Value};
 use shared_crypto::intent::{Intent, IntentMessage};
 use std::fmt::Display;
 use sui_types::{
-    base_types::{ObjectID, SequenceNumber},
+    base_types::{ObjectID, SequenceNumber, SuiAddress as RawSuiAddress},
     crypto::{Signer, ToFromBytes},
     digests::ObjectDigest,
-    transaction::TransactionData,
+    transaction::{
+        Argument, CallArg, Command, ObjectArg, TransactionData, TransactionDataAPI, TransactionKind,
+    },
 };
 
 #[derive(Debug, Clone)]
@@ -41,6 +43,17 @@ impl Input {
         let digest = ObjectDigest::from_str(&self.digest)
             .map_err(|e| TransactionError::Message(e.to_string()))?;
         Ok((object_id, sequence, digest))
+    }
+
+    pub fn from_object_ref(obj: (ObjectID, SequenceNumber, ObjectDigest)) -> Self {
+        let id = obj.0.to_string();
+        let version = obj.1.value();
+        let digest = obj.2.to_string();
+        Self {
+            id,
+            version,
+            digest,
+        }
     }
 }
 
@@ -161,8 +174,98 @@ impl Transaction for SuiTransaction {
         }
     }
 
-    fn from_bytes(_stream: &[u8]) -> Result<Self, TransactionError> {
-        todo!()
+    fn from_bytes(stream: &[u8]) -> Result<Self, TransactionError> {
+        let val = String::from_utf8(stream.to_vec())
+            .map_err(|e| TransactionError::Message(e.to_string()))?;
+        let val = from_str::<Value>(&val)?;
+        let raw_tx = val["raw_tx"].as_str().unwrap();
+        let raw_tx = STANDARD
+            .decode(raw_tx)
+            .map_err(|e| TransactionError::Message(e.to_string()))?;
+        let data = bcs::from_bytes::<TransactionData>(&raw_tx)
+            .map_err(|e| TransactionError::Message(e.to_string()))?;
+        let from = SuiAddress::from_str(&data.sender().to_string())?;
+        let gas_price = data.gas_price();
+        let gas_budget = data.gas_budget();
+
+        let (inputs, outputs) = if let TransactionKind::ProgrammableTransaction(pt) = data.kind() {
+            let mut inputs = vec![];
+            let mut outputs = vec![];
+
+            match &pt.inputs[0] {
+                // we are dealing with token transfer
+                CallArg::Object(_) => {
+                    for input in &pt.inputs {
+                        match input {
+                            CallArg::Object(ObjectArg::ImmOrOwnedObject(obj)) => {
+                                let input = Input::from_object_ref(obj.clone());
+                                inputs.push(input);
+                            }
+                            _ => break,
+                        }
+                    }
+                }
+                // we are dealing with SUI transfer
+                CallArg::Pure(_) => {
+                    for obj in &data.gas_data().payment {
+                        let input = Input::from_object_ref(obj.clone());
+                        inputs.push(input);
+                    }
+                }
+            }
+
+            let mut amounts = vec![];
+            let mut accounts = vec![];
+
+            for cmd in &pt.commands {
+                match cmd {
+                    Command::SplitCoins(_, indexes) => {
+                        for index in indexes {
+                            if let Argument::Input(amount) = index {
+                                amounts.push(*amount);
+                            }
+                        }
+                    }
+                    Command::TransferObjects(_, index) => {
+                        if let Argument::Input(account) = index {
+                            accounts.push(*account);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            let len = accounts.len();
+
+            for i in 0..len {
+                let mut amount = 0u64;
+                let mut to = SuiAddress::default();
+                if let CallArg::Pure(bytes) = &pt.inputs[amounts[i] as usize] {
+                    amount = bcs::from_bytes(bytes)
+                        .map_err(|e| TransactionError::Message(e.to_string()))?;
+                }
+                if let CallArg::Pure(bytes) = &pt.inputs[accounts[i] as usize] {
+                    let _to = bcs::from_bytes::<RawSuiAddress>(bytes)
+                        .map_err(|e| TransactionError::Message(e.to_string()))?;
+                    to = SuiAddress::from_str(&_to.to_string())?;
+                }
+                outputs.push(Output { to, amount });
+            }
+
+            (inputs, outputs)
+        } else {
+            (vec![], vec![])
+        };
+
+        Self::new(&SuiTransactionParameters {
+            from,
+            inputs,
+            outputs,
+            gas_payment: None,
+            gas_price,
+            gas_budget,
+            public_key: vec![],
+        })
     }
 
     fn to_transaction_id(&self) -> Result<Self::TransactionId, TransactionError> {
@@ -187,6 +290,7 @@ impl Display for SuiTransactionId {
 
 mod tests {
     use super::*;
+    use rand::{Rng, RngCore};
     use serde_json::Value;
 
     #[test]
@@ -199,30 +303,18 @@ mod tests {
 
         println!("from: {}\nto: {}", from, to);
 
-        let amount = 1000000000;
         let gas_budget = 5000000;
         let gas_price = 1250;
 
-        let coin_id =
-            "0x257bd81166028d49e27261eef408d860ff39542ee12c11595b6bca3a8e26e753".to_string();
-        let version = 37;
-        let digest = "4TR1LKd3yRJaZSBuLX8QBb3hCHG5JDitQraWWx32jyHz".to_string();
-
         let public_key = sk_to_pk(sk_from);
 
-        let coin = Input {
-            id: coin_id,
-            version,
-            digest,
-        };
-
-        let output = Output { to, amount };
+        let gas = rand_coin();
 
         let tx = SuiTransactionParameters {
             from,
-            inputs: vec![coin.clone()],
-            outputs: vec![output],
-            gas_payment: None,
+            inputs: rand_coins(3),
+            outputs: rand_outputs(10),
+            gas_payment: Some(gas),
             gas_price,
             gas_budget,
             public_key,
@@ -234,11 +326,71 @@ mod tests {
         let sig = sk_sign(sk_from, &txid);
 
         let tx = tx.sign(sig, 0).unwrap();
-        let tx = String::from_utf8(tx).unwrap();
 
-        let tx = serde_json::from_str::<Value>(&tx).unwrap();
+        // let tx = String::from_utf8(tx).unwrap();
+        // let tx = serde_json::from_str::<Value>(&tx).unwrap();
 
-        println!("{}", tx);
+        let tx = SuiTransaction::from_bytes(&tx).unwrap();
+
+        println!("tx = {:?}", tx);
+    }
+
+    fn rand_coins(n: u8) -> Vec<Input> {
+        let mut coins = vec![];
+        for _ in 0..n {
+            let coin = rand_coin();
+            coins.push(coin);
+        }
+        coins
+    }
+
+    fn rand_outputs(n: u8) -> Vec<Output> {
+        let mut outputs = vec![];
+        for _ in 0..n {
+            let output = rand_output();
+            outputs.push(output);
+        }
+        outputs
+    }
+
+    fn rand_output() -> Output {
+        let to = rand_array();
+        let to = SuiAddress::new(to);
+        let amount = 10000;
+        Output { to, amount }
+    }
+
+    fn rand_coin() -> Input {
+        let input = Input {
+            id: rand_coin_id(),
+            version: 37,
+            digest: rand_digest(),
+        };
+        input
+    }
+
+    fn rand_coin_id() -> String {
+        let n = rand_array().to_vec();
+        let coin_id = hex::encode(n);
+        coin_id
+    }
+
+    fn rand_digest() -> String {
+        let n = rand_array().to_vec();
+        let digest = bs58::encode(n).into_string();
+        digest
+    }
+
+    fn rand_array() -> [u8; 32] {
+        let mut rng = rand::thread_rng();
+        let mut array = [0u8; 32];
+        rng.fill(&mut array);
+        array
+    }
+
+    fn rand_u64() -> u64 {
+        let mut rng = rand::thread_rng();
+        rng.next_u64()
     }
 
     use bech32::FromBase32;
