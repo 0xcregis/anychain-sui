@@ -175,14 +175,7 @@ impl Transaction for SuiTransaction {
     }
 
     fn from_bytes(stream: &[u8]) -> Result<Self, TransactionError> {
-        let val = String::from_utf8(stream.to_vec())
-            .map_err(|e| TransactionError::Message(e.to_string()))?;
-        let val = from_str::<Value>(&val)?;
-        let raw_tx = val["raw_tx"].as_str().unwrap();
-        let raw_tx = STANDARD
-            .decode(raw_tx)
-            .map_err(|e| TransactionError::Message(e.to_string()))?;
-        let data = bcs::from_bytes::<TransactionData>(&raw_tx)
+        let data = bcs::from_bytes::<TransactionData>(&stream)
             .map_err(|e| TransactionError::Message(e.to_string()))?;
         let from = SuiAddress::from_str(&data.sender().to_string())?;
         let gas_price = data.gas_price();
@@ -288,6 +281,19 @@ impl Display for SuiTransactionId {
     }
 }
 
+impl FromStr for SuiTransaction {
+    type Err = TransactionError;
+
+    fn from_str(tx: &str) -> Result<Self, Self::Err> {
+        let val = from_str::<Value>(&tx)?;
+        let raw_tx = val["raw_tx"].as_str().unwrap();
+        let raw_tx = STANDARD
+            .decode(raw_tx)
+            .map_err(|e| TransactionError::Message(e.to_string()))?;
+        Self::from_bytes(&raw_tx)
+    }
+}
+
 mod tests {
     use super::*;
     use rand::{Rng, RngCore};
@@ -327,10 +333,9 @@ mod tests {
 
         let tx = tx.sign(sig, 0).unwrap();
 
-        // let tx = String::from_utf8(tx).unwrap();
-        // let tx = serde_json::from_str::<Value>(&tx).unwrap();
+        let tx = String::from_utf8(tx).unwrap();
 
-        let tx = SuiTransaction::from_bytes(&tx).unwrap();
+        let tx = SuiTransaction::from_str(&tx).unwrap();
 
         println!("tx = {:?}", tx);
     }
