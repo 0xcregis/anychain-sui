@@ -50,7 +50,7 @@ pub struct SuiTransactionParameters {
     // suix_getCoins(from, token_type)
     pub inputs: Vec<Input>,
     pub outputs: Vec<Output>,
-    pub gas_payment: Input,
+    pub gas_payment: Option<Input>,
     pub gas_price: u64,
     pub gas_budget: u64,
     pub public_key: Vec<u8>,
@@ -90,7 +90,6 @@ impl Transaction for SuiTransaction {
     fn to_bytes(&self) -> Result<Vec<u8>, TransactionError> {
         let from = self.params.from.to_raw();
 
-        let gas_payment = self.params.gas_payment.to_object_ref()?;
         let gas_budget = self.params.gas_budget;
         let gas_price = self.params.gas_price;
 
@@ -108,16 +107,31 @@ impl Transaction for SuiTransaction {
             amounts.push(output.amount);
         }
 
-        let data = TransactionData::new_pay(
-            from,
-            coins,
-            recipients,
-            amounts,
-            gas_payment,
-            gas_budget,
-            gas_price,
-        )
-        .map_err(|e| TransactionError::Message(e.to_string()))?;
+        let data = match &self.params.gas_payment {
+            Some(gas) => TransactionData::new_pay(
+                from,
+                coins,
+                recipients,
+                amounts,
+                gas.to_object_ref()?,
+                gas_budget,
+                gas_price,
+            )
+            .map_err(|e| TransactionError::Message(e.to_string()))?,
+            None => {
+                let gas = coins.pop();
+                TransactionData::new_pay_sui(
+                    from,
+                    coins,
+                    recipients,
+                    amounts,
+                    gas.unwrap(),
+                    gas_budget,
+                    gas_price,
+                )
+                .map_err(|e| TransactionError::Message(e.to_string()))?
+            }
+        };
 
         match &self.signature {
             Some(sig) => {
@@ -189,7 +203,8 @@ mod tests {
         let gas_budget = 5000000;
         let gas_price = 1250;
 
-        let coin_id = "0x257bd81166028d49e27261eef408d860ff39542ee12c11595b6bca3a8e26e753".to_string();
+        let coin_id =
+            "0x257bd81166028d49e27261eef408d860ff39542ee12c11595b6bca3a8e26e753".to_string();
         let version = 37;
         let digest = "4TR1LKd3yRJaZSBuLX8QBb3hCHG5JDitQraWWx32jyHz".to_string();
 
@@ -207,7 +222,7 @@ mod tests {
             from,
             inputs: vec![coin.clone()],
             outputs: vec![output],
-            gas_payment: coin,
+            gas_payment: None,
             gas_price,
             gas_budget,
             public_key,
