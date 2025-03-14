@@ -175,7 +175,7 @@ impl Transaction for SuiTransaction {
     }
 
     fn from_bytes(stream: &[u8]) -> Result<Self, TransactionError> {
-        let data = bcs::from_bytes::<TransactionData>(&stream)
+        let data = bcs::from_bytes::<TransactionData>(stream)
             .map_err(|e| TransactionError::Message(e.to_string()))?;
         let from = SuiAddress::from_str(&data.sender().to_string())?;
         let gas_price = data.gas_price();
@@ -191,7 +191,7 @@ impl Transaction for SuiTransaction {
                     for input in &pt.inputs {
                         match input {
                             CallArg::Object(ObjectArg::ImmOrOwnedObject(obj)) => {
-                                let input = Input::from_object_ref(obj.clone());
+                                let input = Input::from_object_ref(*obj);
                                 inputs.push(input);
                             }
                             _ => break,
@@ -201,7 +201,7 @@ impl Transaction for SuiTransaction {
                 // we are dealing with SUI transfer
                 CallArg::Pure(_) => {
                     for obj in &data.gas_data().payment {
-                        let input = Input::from_object_ref(obj.clone());
+                        let input = Input::from_object_ref(*obj);
                         inputs.push(input);
                     }
                 }
@@ -211,37 +211,51 @@ impl Transaction for SuiTransaction {
             let mut accounts = vec![];
 
             for cmd in &pt.commands {
-                match cmd {
-                    Command::SplitCoins(_, indexes) => {
-                        for index in indexes {
-                            if let Argument::Input(amount) = index {
-                                amounts.push(*amount);
-                            }
+                if let Command::SplitCoins(_, indexes) = cmd {
+                    for index in indexes {
+                        if let Argument::Input(amount) = index {
+                            amounts.push(*amount);
                         }
                     }
-                    Command::TransferObjects(_, index) => {
-                        if let Argument::Input(account) = index {
-                            accounts.push(*account);
-                        }
-                    }
-                    _ => {}
+                    break;
                 }
             }
 
-            let len = accounts.len();
+            for cmd in &pt.commands {
+                if let Command::TransferObjects(array, index) = cmd {
+                    for elem in array {
+                        if let (Argument::NestedResult(_, index1), Argument::Input(index)) =
+                            (elem, index)
+                        {
+                            accounts.push((*index1, *index));
+                        }
+                    }
+                }
+            }
 
-            for i in 0..len {
+            let len = amounts.len();
+
+            if len != accounts.len() {
+                return Err(TransactionError::Message("decode error".to_string()));
+            }
+
+            for (index1, index) in accounts {
                 let mut amount = 0u64;
                 let mut to = SuiAddress::default();
-                if let CallArg::Pure(bytes) = &pt.inputs[amounts[i] as usize] {
+
+                let input_index = amounts[index1 as usize];
+
+                if let CallArg::Pure(bytes) = &pt.inputs[input_index as usize] {
                     amount = bcs::from_bytes(bytes)
                         .map_err(|e| TransactionError::Message(e.to_string()))?;
                 }
-                if let CallArg::Pure(bytes) = &pt.inputs[accounts[i] as usize] {
+
+                if let CallArg::Pure(bytes) = &pt.inputs[index as usize] {
                     let _to = bcs::from_bytes::<RawSuiAddress>(bytes)
                         .map_err(|e| TransactionError::Message(e.to_string()))?;
                     to = SuiAddress::from_str(&_to.to_string())?;
                 }
+
                 outputs.push(Output { to, amount });
             }
 
@@ -285,7 +299,7 @@ impl FromStr for SuiTransaction {
     type Err = TransactionError;
 
     fn from_str(tx: &str) -> Result<Self, Self::Err> {
-        let val = from_str::<Value>(&tx)?;
+        let val = from_str::<Value>(tx)?;
         let raw_tx = val["raw_tx"].as_str().unwrap();
         let raw_tx = STANDARD
             .decode(raw_tx)
@@ -316,10 +330,34 @@ mod tests {
 
         let gas = rand_coin();
 
+        let output1 = Output {
+            to: SuiAddress::from_str(
+                "0xc160aa8cda0e6ed2d96172395fbc30fe30f72f6447d26a41fd906151ab372d05",
+            )
+            .unwrap(),
+            amount: 10000,
+        };
+
+        let output2 = Output {
+            to: SuiAddress::from_str(
+                "0xc160aa8cda0e6ed2d96172395fbc30fe30f72f6447d26a41fd906151ab372d05",
+            )
+            .unwrap(),
+            amount: 20000,
+        };
+
+        let output3 = Output {
+            to: SuiAddress::from_str(
+                "0xc161aa8cda0e6ed2d96172395fbc30fe30f72f6447d26a41fd906151ab372d05",
+            )
+            .unwrap(),
+            amount: 10000,
+        };
+
         let tx = SuiTransactionParameters {
             from,
             inputs: rand_coins(3),
-            outputs: rand_outputs(10),
+            outputs: vec![output1, output2, output3],
             gas_payment: Some(gas),
             gas_price,
             gas_budget,
@@ -366,24 +404,21 @@ mod tests {
     }
 
     fn rand_coin() -> Input {
-        let input = Input {
+        Input {
             id: rand_coin_id(),
             version: 37,
             digest: rand_digest(),
-        };
-        input
+        }
     }
 
     fn rand_coin_id() -> String {
         let n = rand_array().to_vec();
-        let coin_id = hex::encode(n);
-        coin_id
+        hex::encode(n)
     }
 
     fn rand_digest() -> String {
         let n = rand_array().to_vec();
-        let digest = bs58::encode(n).into_string();
-        digest
+        bs58::encode(n).into_string()
     }
 
     fn rand_array() -> [u8; 32] {
@@ -405,8 +440,7 @@ mod tests {
         let data = Vec::from_base32(&data).unwrap();
         let sk = Ed25519PrivateKey::from_bytes(&data[1..]).unwrap();
         let sk = SuiPrivateKey::Ed25519(sk);
-        let addr = SuiAddress::from_secret_key(&sk, &SuiFormat::Hex).unwrap();
-        addr
+        SuiAddress::from_secret_key(&sk, &SuiFormat::Hex).unwrap()
     }
 
     fn sk_to_pk(sk: &str) -> Vec<u8> {
@@ -425,7 +459,6 @@ mod tests {
         let sk = Ed25519PrivateKey::from_bytes(&data[1..]).unwrap();
         let keypair = Ed25519KeyPair::from(sk);
         let sig: Ed25519Signature = keypair.sign(msg);
-        let sig = sig.sig.to_bytes().to_vec();
-        sig
+        sig.sig.to_bytes().to_vec()
     }
 }
