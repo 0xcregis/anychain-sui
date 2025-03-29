@@ -7,7 +7,7 @@ use {
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SuiPublicKey(pub(crate) ed25519_dalek::PublicKey);
+pub struct SuiPublicKey(pub ed25519_dalek::PublicKey);
 
 impl PublicKey for SuiPublicKey {
     type SecretKey = Scalar;
