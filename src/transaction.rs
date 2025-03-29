@@ -1,6 +1,5 @@
-use crate::{address::SuiAddress, format::SuiFormat, SuiPrivateKey, SuiPublicKey};
+use crate::{SuiAddress, SuiFormat, SuiPublicKey};
 use anychain_core::{Address, Transaction, TransactionError, TransactionId};
-
 use base64::engine::{general_purpose::STANDARD, Engine};
 use core::str::FromStr;
 use fastcrypto::{
@@ -12,7 +11,7 @@ use serde_json::{from_str, json, Value};
 use shared_crypto::intent::{Intent, IntentMessage};
 use std::fmt::Display;
 use sui_types::{
-    base_types::{ObjectID, SequenceNumber, SuiAddress as RawSuiAddress},
+    base_types::{ObjectID, SequenceNumber, SuiAddress as SuiAddr},
     crypto::{Signer, ToFromBytes},
     digests::ObjectDigest,
     transaction::{
@@ -101,7 +100,7 @@ impl Transaction for SuiTransaction {
     }
 
     fn to_bytes(&self) -> Result<Vec<u8>, TransactionError> {
-        let from = self.params.from.to_raw();
+        let from = self.params.from.to_raw()?;
 
         let gas_budget = self.params.gas_budget;
         let gas_price = self.params.gas_price;
@@ -116,7 +115,7 @@ impl Transaction for SuiTransaction {
         }
 
         for output in &self.params.outputs {
-            recipients.push(output.to.to_raw());
+            recipients.push(output.to.to_raw()?);
             amounts.push(output.amount);
         }
 
@@ -241,7 +240,7 @@ impl Transaction for SuiTransaction {
 
             for (index1, index) in accounts {
                 let mut amount = 0u64;
-                let mut to = SuiAddress::default();
+                let mut to = SuiAddress::new([0; 32])?;
 
                 let input_index = amounts[index1 as usize];
 
@@ -251,7 +250,7 @@ impl Transaction for SuiTransaction {
                 }
 
                 if let CallArg::Pure(bytes) = &pt.inputs[index as usize] {
-                    let _to = bcs::from_bytes::<RawSuiAddress>(bytes)
+                    let _to = bcs::from_bytes::<SuiAddr>(bytes)
                         .map_err(|e| TransactionError::Message(e.to_string()))?;
                     to = SuiAddress::from_str(&_to.to_string())?;
                 }
@@ -398,7 +397,7 @@ mod tests {
 
     fn rand_output() -> Output {
         let to = rand_array();
-        let to = SuiAddress::new(to);
+        let to = SuiAddress::new(to).unwrap();
         let amount = 10000;
         Output { to, amount }
     }
@@ -436,11 +435,12 @@ mod tests {
     use bech32::FromBase32;
 
     fn sk_to_addr(sk: &str) -> SuiAddress {
-        let (_, data, _) = bech32::decode(sk).unwrap();
-        let data = Vec::from_base32(&data).unwrap();
-        let sk = Ed25519PrivateKey::from_bytes(&data[1..]).unwrap();
-        let sk = SuiPrivateKey::Ed25519(sk);
-        SuiAddress::from_secret_key(&sk, &SuiFormat::Hex).unwrap()
+        let pk = sk_to_pk(sk);
+        let mut hasher = Blake2b256::new();
+        hasher.update([0u8]);
+        hasher.update(pk);
+        let hash = hasher.finalize().digest;
+        SuiAddress::new(hash).unwrap()
     }
 
     fn sk_to_pk(sk: &str) -> Vec<u8> {
