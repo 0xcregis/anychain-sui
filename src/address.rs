@@ -44,14 +44,13 @@ impl SuiAddress {
     }
 
     pub fn to_raw(&self) -> Result<SuiAddr, AddressError> {
-        SuiAddr::from_bytes(self.0)
-            .map_err(|e| AddressError::Message(e.to_string()))
+        SuiAddr::from_bytes(self.0).map_err(|e| AddressError::Message(e.to_string()))
     }
 }
 
 impl FromStr for SuiAddress {
     type Err = AddressError;
-    
+
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let addr = match s.starts_with("0x") {
             true => &s[2..],

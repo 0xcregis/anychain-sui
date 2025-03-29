@@ -1,5 +1,5 @@
 use {
-    crate::{SuiAddress, format::SuiFormat},
+    crate::{format::SuiFormat, SuiAddress},
     anychain_core::{Address, AddressError, PublicKey, PublicKeyError},
     core::{fmt, str::FromStr},
     curve25519_dalek::{constants::ED25519_BASEPOINT_TABLE as G, Scalar},
