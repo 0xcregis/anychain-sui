@@ -1,3 +1,6 @@
+#![allow(unused_imports)]
+#![allow(dead_code)]
+
 use crate::{SuiAddress, SuiFormat, SuiPublicKey};
 use anychain_core::{Address, Transaction, TransactionError, TransactionId};
 use base64::engine::{general_purpose::STANDARD, Engine};
@@ -320,7 +323,7 @@ mod tests {
         let from = sk_to_addr(sk_from);
         let to = sk_to_addr(sk_to);
 
-        println!("from: {}\nto: {}", from, to);
+        println!("from: {from}\nto: {to}");
 
         let gas_budget = 5000000;
         let gas_price = 1250;
@@ -374,7 +377,7 @@ mod tests {
 
         let tx = SuiTransaction::from_str(&tx).unwrap();
 
-        println!("tx = {:?}", tx);
+        println!("tx = {tx:?}");
     }
 
     fn rand_coins(n: u8) -> Vec<Input> {
