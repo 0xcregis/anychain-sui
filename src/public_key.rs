@@ -7,7 +7,7 @@ use {
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SuiPublicKey(pub ed25519_dalek::PublicKey);
+pub struct SuiPublicKey(pub ed25519_dalek::VerifyingKey);
 
 impl PublicKey for SuiPublicKey {
     type SecretKey = Scalar;
@@ -17,7 +17,7 @@ impl PublicKey for SuiPublicKey {
     fn from_secret_key(secret_key: &Self::SecretKey) -> Self {
         let public_key = secret_key * G;
         let public_key = public_key.to_bytes();
-        let public_key = ed25519_dalek::PublicKey::from_bytes(&public_key).unwrap();
+        let public_key = ed25519_dalek::VerifyingKey::from_bytes(&public_key).unwrap();
         SuiPublicKey(public_key)
     }
 
