@@ -219,7 +219,7 @@ dependencies = [
 
 [[package]]
 name = "anychain-sui"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anychain-core",
  "base64 0.22.1",
