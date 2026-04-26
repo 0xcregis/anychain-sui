@@ -316,14 +316,21 @@ mod tests {
     use serde_json::Value;
 
     #[test]
-    fn test_tx() {
+    fn test_tx_random_generated() {
         let sk_from = "suiprivkey1qzjx78cfcqww8prl6cw569rgz3v095a5qc3kae93374nhn23r9w0xqh7628";
         let sk_to = "suiprivkey1qz4geqyqpa83waxmnf2vr80qemktms0gzthy5r07j4naaettnvwpkf6swws";
 
         let from = sk_to_addr(sk_from);
         let to = sk_to_addr(sk_to);
 
-        println!("from: {from}\nto: {to}");
+        assert_eq!(
+            from.to_string(),
+            "0x9c8400f7d8bdd5a44ec6a481b6390de282bccb1cf3cb993041e22facba39829f"
+        );
+        assert_eq!(
+            to.to_string(),
+            "0x31740f7baab504daf514d1cdb99965b921c50309c7410ecc98d9ccba13568ad7"
+        );
 
         let gas_budget = 5000000;
         let gas_price = 1250;
@@ -374,10 +381,85 @@ mod tests {
         let tx = tx.sign(sig, 0).unwrap();
 
         let tx = String::from_utf8(tx).unwrap();
+        let _tx = SuiTransaction::from_str(&tx).unwrap();
 
-        let tx = SuiTransaction::from_str(&tx).unwrap();
+        // println!("tx = {tx:?}");
+    }
 
-        println!("tx = {tx:?}");
+    #[test]
+    fn test_tx_fixed_input() {
+        let sk_from = "suiprivkey1qzjx78cfcqww8prl6cw569rgz3v095a5qc3kae93374nhn23r9w0xqh7628";
+        let sk_to = "suiprivkey1qz4geqyqpa83waxmnf2vr80qemktms0gzthy5r07j4naaettnvwpkf6swws";
+
+        let from = sk_to_addr(sk_from);
+        let to = sk_to_addr(sk_to);
+
+        let gas_budget = 5000000;
+        let gas_price = 1250;
+        let public_key = sk_to_pk(sk_from);
+
+        let tx = SuiTransactionParameters {
+            from,
+            inputs: fixed_coins(3),
+            outputs: vec![
+                Output {
+                    to: to.clone(),
+                    amount: 10000,
+                },
+                Output { to, amount: 20000 },
+            ],
+            gas_payment: Some(fixed_coin(9)),
+            gas_price,
+            gas_budget,
+            public_key,
+        };
+
+        let mut tx = SuiTransaction::new(&tx).unwrap();
+        let txid = tx.to_transaction_id().unwrap().0.to_vec();
+        let sig = sk_sign(sk_from, &txid);
+        let expected_pk = sk_to_pk(sk_from);
+
+        let tx = tx.sign(sig.clone(), 0).unwrap();
+        let tx = String::from_utf8(tx).unwrap();
+        let decoded = SuiTransaction::from_str(&tx).unwrap();
+
+        assert_eq!(decoded.params.inputs.len(), 3);
+        assert_eq!(decoded.params.outputs.len(), 2);
+        assert_eq!(decoded.params.outputs[0].amount, 10000);
+        assert_eq!(decoded.params.outputs[1].amount, 20000);
+
+        // Decode signed payload to assert the JSON output contract.
+        let payload = from_str::<Value>(&tx).unwrap();
+        let raw_tx = payload["raw_tx"].as_str().unwrap();
+        let sig_b64 = payload["signature"].as_str().unwrap();
+
+        assert_eq!(raw_tx, "AAAGAQABAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBASUAAAAAAAAAIGVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlAQACAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAiUAAAAAAAAAIGZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmAQADAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAyUAAAAAAAAAIGdnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnAAgQJwAAAAAAAAAIIE4AAAAAAAAAIDF0D3uqtQTa9RTRzbmZZbkhxQMJx0EOzJjZzLoTVorXAwMBAAACAQEAAQIAAgEAAAIBAwABBAABAgMBAAAAAwEAAQABBQCchAD32L3VpE7GpIG2OQ3igrzLHPPLmTBB4i+sujmCnwEKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCiUAAAAAAAAAIG5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5unIQA99i91aROxqSBtjkN4oK8yxzzy5kwQeIvrLo5gp/iBAAAAAAAAEBLTAAAAAAAAA==");
+        assert_eq!(sig_b64, "AGDgkcpvzsIZy5WnsZjDoRT6yuu8gsEPmfrLEe4tqyley0WUClB8LBsnmI4OyJWajpZ5TNOVS/FhB0GbKjT1VQMsjJ4+cC5bSI90eMpbSUkNUxTxyKtF9HEG9Pf9bXfNDw==");
+
+        //  Assert decoded signature public key
+        let decoded_sig = STANDARD.decode(sig_b64).unwrap();
+
+        // format: [scheme_flag | signature | public_key]
+        assert_eq!(decoded_sig.len(), 97);
+        assert_eq!(decoded_sig[0], 0u8); // ed25519 flag
+        assert_eq!(&decoded_sig[1..65], sig.as_slice());
+        assert_eq!(&decoded_sig[65..97], expected_pk.as_slice());
+    }
+
+    fn fixed_coins(n: u8) -> Vec<Input> {
+        let mut coins = vec![];
+        for i in 0..n {
+            coins.push(fixed_coin(i));
+        }
+        coins
+    }
+
+    fn fixed_coin(seed: u8) -> Input {
+        Input {
+            id: format!("0x{}", hex::encode([seed + 1; 32])),
+            version: 37,
+            digest: bs58::encode([seed + 101; 32]).into_string(),
+        }
     }
 
     fn rand_coins(n: u8) -> Vec<Input> {
