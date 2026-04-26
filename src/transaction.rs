@@ -310,6 +310,7 @@ impl FromStr for SuiTransaction {
     }
 }
 
+#[cfg(test)]
 mod tests {
     use super::*;
     use rand::{Rng, RngCore};
@@ -545,5 +546,161 @@ mod tests {
         let keypair = Ed25519KeyPair::from(sk);
         let sig: Ed25519Signature = keypair.sign(msg);
         sig.sig.to_bytes().to_vec()
+    }
+
+    // 04/27/2026 append test
+
+    const FIXED_SK_FROM: &str =
+        "suiprivkey1qzjx78cfcqww8prl6cw569rgz3v095a5qc3kae93374nhn23r9w0xqh7628";
+
+    const FIXED_SK_TO: &str =
+        "suiprivkey1qz4geqyqpa83waxmnf2vr80qemktms0gzthy5r07j4naaettnvwpkf6swws";
+
+    fn fixed_tx_params() -> SuiTransactionParameters {
+        let from = sk_to_addr(FIXED_SK_FROM);
+        let to = sk_to_addr(FIXED_SK_TO);
+
+        SuiTransactionParameters {
+            from,
+            inputs: fixed_coins(3),
+            outputs: vec![
+                Output {
+                    to: to.clone(),
+                    amount: 10000,
+                },
+                Output { to, amount: 20000 },
+            ],
+            gas_payment: Some(fixed_coin(9)),
+            gas_price: 1250,
+            gas_budget: 5000000,
+            public_key: sk_to_pk(FIXED_SK_FROM),
+        }
+    }
+
+    #[test]
+    fn test_sign_invalid_signature_length() {
+        let params = fixed_tx_params();
+        let mut tx = SuiTransaction::new(&params).unwrap();
+
+        let err = tx.sign(vec![0u8; 63], 0).unwrap_err();
+
+        assert!(err.to_string().contains("Invalid signature length 63"));
+    }
+
+    #[test]
+    fn test_unsigned_to_bytes_is_intent_message() {
+        let params = fixed_tx_params();
+        let tx = SuiTransaction::new(&params).unwrap();
+
+        let bytes = tx.to_bytes().unwrap();
+
+        // Intent::sui_transaction(): scope=0, version=0, app_id=0
+        assert_eq!(&bytes[0..3], &[0u8, 0u8, 0u8]);
+    }
+
+    #[test]
+    fn test_from_bytes_roundtrip_with_gas_payment() {
+        let params = fixed_tx_params();
+        let tx = SuiTransaction::new(&params).unwrap();
+
+        let mut signed_tx = tx.clone();
+        let txid = signed_tx.to_transaction_id().unwrap().0.to_vec();
+        let sig = sk_sign(FIXED_SK_FROM, &txid);
+        let signed_bytes = signed_tx.sign(sig, 0).unwrap();
+
+        let signed_json: Value = serde_json::from_slice(&signed_bytes).unwrap();
+        let raw_tx = signed_json["raw_tx"].as_str().unwrap();
+        let raw_tx_bytes = STANDARD.decode(raw_tx).unwrap();
+
+        let decoded = SuiTransaction::from_bytes(&raw_tx_bytes).unwrap();
+
+        assert_eq!(decoded.params.inputs.len(), 3);
+        assert_eq!(decoded.params.outputs.len(), 2);
+        assert_eq!(decoded.params.outputs[0].amount, 10000);
+        assert_eq!(decoded.params.outputs[1].amount, 20000);
+        assert_eq!(decoded.params.gas_price, params.gas_price);
+        assert_eq!(decoded.params.gas_budget, params.gas_budget);
+    }
+
+    #[test]
+    fn test_from_bytes_roundtrip_without_gas_payment() {
+        let mut params = fixed_tx_params();
+        params.gas_payment = None;
+
+        let tx = SuiTransaction::new(&params).unwrap();
+        let bytes = tx.to_bytes().unwrap();
+
+        // unsigned bytes are IntentMessage<TransactionData>
+        let intent_msg: IntentMessage<TransactionData> = bcs::from_bytes(&bytes).unwrap();
+        let raw_tx_bytes = bcs::to_bytes(&intent_msg.value).unwrap();
+
+        let decoded = SuiTransaction::from_bytes(&raw_tx_bytes).unwrap();
+
+        // new_pay_sui uses one input as gas, so decoded inputs come from gas_data.payment
+        assert!(!decoded.params.inputs.is_empty());
+        assert_eq!(decoded.params.outputs.len(), 2);
+        assert_eq!(decoded.params.outputs[0].amount, 10000);
+        assert_eq!(decoded.params.outputs[1].amount, 20000);
+    }
+
+    #[test]
+    fn test_from_str_invalid_json() {
+        assert!("not-json".parse::<SuiTransaction>().is_err());
+    }
+
+    // #[test]
+    // #[should_panic]
+    // fn test_from_str_missing_raw_tx_panics() {
+    //     let _ = r#"{"signature":"abc"}"#.parse::<SuiTransaction>();
+    // }
+
+    #[test]
+    fn test_from_str_invalid_raw_tx_base64() {
+        let tx = r#"{"raw_tx":"%%%","signature":"abc"}"#;
+
+        assert!(tx.parse::<SuiTransaction>().is_err());
+    }
+
+    #[test]
+    fn test_input_object_ref_roundtrip() {
+        let input = fixed_coin(1);
+
+        let obj_ref = input.to_object_ref().unwrap();
+        let decoded = Input::from_object_ref(obj_ref);
+
+        assert_eq!(decoded.id, input.id);
+        assert_eq!(decoded.version, input.version);
+        assert_eq!(decoded.digest, input.digest);
+    }
+
+    #[test]
+    fn test_input_to_object_ref_invalid_object_id() {
+        let mut input = fixed_coin(1);
+        input.id = "invalid_object_id".to_string();
+
+        assert!(input.to_object_ref().is_err());
+    }
+
+    #[test]
+    fn test_input_to_object_ref_invalid_digest() {
+        let mut input = fixed_coin(1);
+        input.digest = "invalid_digest".to_string();
+
+        assert!(input.to_object_ref().is_err());
+    }
+
+    #[test]
+    fn test_signed_transaction_json_shape() {
+        let params = fixed_tx_params();
+        let mut tx = SuiTransaction::new(&params).unwrap();
+
+        let txid = tx.to_transaction_id().unwrap().0.to_vec();
+        let sig = sk_sign(FIXED_SK_FROM, &txid);
+
+        let signed = tx.sign(sig, 0).unwrap();
+        let json: Value = serde_json::from_slice(&signed).unwrap();
+
+        assert!(json["raw_tx"].as_str().is_some());
+        assert!(json["signature"].as_str().is_some());
     }
 }
