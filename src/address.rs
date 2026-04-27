@@ -6,8 +6,8 @@ use {
         str::FromStr,
     },
     curve25519_dalek::Scalar,
-    fastcrypto::hash::{Blake2b256, HashFunction},
-    sui_types::base_types::SuiAddress as SuiAddr,
+    // fastcrypto::hash::{Blake2b256, HashFunction},
+    sui_sdk_types::{hash::Hasher, Address as SuiAddr},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -25,16 +25,31 @@ impl Address for SuiAddress {
         SuiPublicKey::from_secret_key(secret_key).to_address(&SuiFormat::Base64)
     }
 
+    /*
+    sui-sdk-types/src/hash.rs
+
+    pub fn derive_address(&self) -> Address {
+        let mut hasher = Hasher::new();
+        self.write_into_hasher(&mut hasher);
+        let digest = hasher.finalize();
+        Address::new(digest.into_inner())
+    }
+
+    fn write_into_hasher(&self, hasher: &mut Hasher) {
+        hasher.update([self.scheme().to_u8()]);
+        hasher.update(self.inner());
+    }
+     */
     fn from_public_key(
         public_key: &Self::PublicKey,
         _: &Self::Format,
     ) -> Result<Self, AddressError> {
         let pk = public_key.0.as_bytes();
-        let mut hasher = Blake2b256::new();
+        let mut hasher = Hasher::new();
         hasher.update([0u8]); // we deal only with ed25519 public key
         hasher.update(pk);
-        let hash = hasher.finalize().digest;
-        SuiAddress::new(hash)
+        let digest = hasher.finalize();
+        SuiAddress::new(digest.into_inner())
     }
 }
 
@@ -51,6 +66,20 @@ impl SuiAddress {
 impl FromStr for SuiAddress {
     type Err = AddressError;
 
+    // fn from_str(s: &str) -> Result<Self, Self::Err> {
+    //     let addr = match s.starts_with("0x") {
+    //         true => &s[2..],
+    //         false => s,
+    //     };
+    //     if addr.len() != 64 {
+    //         return Err(AddressError::InvalidCharacterLength(addr.len()));
+    //     }
+    //     let addr = hex::decode(addr)?;
+    //     let mut hash = [0u8; 32];
+    //     hash.copy_from_slice(&addr);
+    //     Ok(SuiAddress(hash))
+    // }
+
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let addr = match s.starts_with("0x") {
             true => &s[2..],
@@ -59,10 +88,10 @@ impl FromStr for SuiAddress {
         if addr.len() != 64 {
             return Err(AddressError::InvalidCharacterLength(addr.len()));
         }
-        let addr = hex::decode(addr)?;
-        let mut hash = [0u8; 32];
-        hash.copy_from_slice(&addr);
-        Ok(SuiAddress(hash))
+
+        let addr = sui_sdk_types::Address::from_hex(s)
+            .map_err(|e| AddressError::Message(e.to_string()))?;
+        Ok(Self(addr.into_inner()))
     }
 }
 

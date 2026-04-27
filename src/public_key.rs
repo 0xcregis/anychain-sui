@@ -16,9 +16,10 @@ impl PublicKey for SuiPublicKey {
 
     fn from_secret_key(secret_key: &Self::SecretKey) -> Self {
         let public_key = secret_key * G;
-        let public_key = public_key.to_bytes();
-        let public_key = ed25519_dalek::VerifyingKey::from_bytes(&public_key).unwrap();
-        SuiPublicKey(public_key)
+        let bytes = public_key.to_bytes();
+        let public_key = ed25519_dalek::VerifyingKey::from_bytes(&bytes)
+            .expect("ed25519 public key should be valid");
+        Self(public_key)
     }
 
     fn to_address(&self, format: &Self::Format) -> Result<Self::Address, AddressError> {
