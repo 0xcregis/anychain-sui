@@ -4,7 +4,7 @@ use std::fmt::Display;
 #[derive(Hash, Clone, PartialEq, PartialOrd, Eq, Ord, Debug)]
 pub enum SuiFormat {
     Hex,
-    Base64,
+    // Base64, No address format other than hex is used in Sui
 }
 
 impl Format for SuiFormat {}

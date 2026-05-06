@@ -18,3 +18,9 @@ clean:
 
 build:
 	cargo build --release
+
+build-example:
+	cargo build --examples
+
+run-example:
+	cargo run --example address-and-transfer

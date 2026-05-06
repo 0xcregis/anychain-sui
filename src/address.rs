@@ -22,7 +22,7 @@ impl Address for SuiAddress {
         secret_key: &Self::SecretKey,
         _: &Self::Format,
     ) -> Result<Self, AddressError> {
-        SuiPublicKey::from_secret_key(secret_key).to_address(&SuiFormat::Base64)
+        SuiPublicKey::from_secret_key(secret_key).to_address(&SuiFormat::Hex)
     }
 
     /*
@@ -199,5 +199,47 @@ mod tests {
             addr.to_string(),
             "0x9272473946cc1517b4b254957566d1cbd4baf10d8d16c6a5c23da5818e27d9ca"
         );
+    }
+
+    use curve25519_dalek::scalar::Scalar;
+    use ed25519_dalek::SigningKey;
+
+    const SEED_ALICE: [u8; 32] = [1u8; 32];
+    const SEED_BOB: [u8; 32] = [2u8; 32];
+
+    const SCALAR_BYTES_SEED_ALICE: [u8; 32] = [
+        202, 240, 171, 205, 215, 167, 224, 27, 59, 98, 120, 15, 54, 14, 189, 47, 174, 26, 23, 3,
+        82, 134, 81, 182, 155, 193, 118, 192, 136, 190, 243, 14,
+    ];
+
+    const SCALAR_BYTES_SEED_BOB: [u8; 32] = [
+        244, 236, 138, 247, 95, 55, 67, 44, 199, 164, 153, 95, 55, 238, 52, 98, 10, 196, 14, 137,
+        134, 199, 135, 147, 219, 29, 78, 243, 105, 252, 161, 14,
+    ];
+
+    const ADDRESS_ALICE: &str =
+        "0x29dfbf688abce7ab43bb8e70cae158ae961196e721440f515482f8ba1684390f";
+    const ADDRESS_BOB: &str = "0x7799ea80594c35644321148485238c7a7a1c6549809e1795e6747c6d4da2504c";
+    #[test]
+    fn test_signing_key_to_scalar_match() {
+        // SigningKey -> Scalar
+        let sk = SigningKey::from_bytes(&SEED_ALICE);
+        let scalar = sk.to_scalar();
+
+        // Scalar from bytes
+        // Scalar::from_bytes_mod_order();
+
+        // Alice
+        assert_eq!(scalar.to_bytes(), SCALAR_BYTES_SEED_ALICE);
+        let addr = SuiAddress::from_secret_key(&scalar, &SuiFormat::Hex).unwrap();
+        assert_eq!(addr.to_string(), ADDRESS_ALICE);
+
+        let sk = SigningKey::from_bytes(&SEED_BOB);
+        let scalar = sk.to_scalar();
+
+        // Bob
+        assert_eq!(scalar.to_bytes(), SCALAR_BYTES_SEED_BOB);
+        let addr = SuiAddress::from_secret_key(&scalar, &SuiFormat::Hex).unwrap();
+        assert_eq!(addr.to_string(), ADDRESS_BOB);
     }
 }
