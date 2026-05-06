@@ -1,6 +1,7 @@
 use {
     crate::{format::SuiFormat, SuiAddress},
     anychain_core::{Address, AddressError, PublicKey, PublicKeyError},
+    base64ct::{Base64, Encoding},
     core::{fmt, str::FromStr},
     curve25519_dalek::{constants::ED25519_BASEPOINT_TABLE as G, Scalar},
     group::GroupEncoding,
@@ -29,14 +30,27 @@ impl PublicKey for SuiPublicKey {
 
 impl FromStr for SuiPublicKey {
     type Err = PublicKeyError;
-    fn from_str(_: &str) -> Result<Self, Self::Err> {
-        todo!()
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut bytes = [0u8; 32];
+
+        let decoded = Base64::decode(s, &mut bytes)
+            .map_err(|e| PublicKeyError::Crate("from_str", e.to_string()))?;
+
+        if decoded.len() != 32 {
+            return Err(PublicKeyError::InvalidCharacterLength(decoded.len()));
+        }
+
+        let public_key = ed25519_dalek::VerifyingKey::from_bytes(&bytes)
+            .map_err(|e| PublicKeyError::Crate("from_str", e.to_string()))?;
+
+        Ok(SuiPublicKey(public_key))
     }
 }
 
 impl fmt::Display for SuiPublicKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", bs58::encode(self.0.to_bytes()).into_string())
+        write!(f, "{}", Base64::encode_string(&self.0.to_bytes()))
     }
 }
 
@@ -44,32 +58,45 @@ impl fmt::Display for SuiPublicKey {
 mod tests {
     use super::*;
 
+    const SCALAR_BYTES_SEED_ALICE: [u8; 32] = [
+        202, 240, 171, 205, 215, 167, 224, 27, 59, 98, 120, 15, 54, 14, 189, 47, 174, 26, 23, 3,
+        82, 134, 81, 182, 155, 193, 118, 192, 136, 190, 243, 14,
+    ];
+
+    const SCALAR_BYTES_SEED_BOB: [u8; 32] = [
+        244, 236, 138, 247, 95, 55, 67, 44, 199, 164, 153, 95, 55, 238, 52, 98, 10, 196, 14, 137,
+        134, 199, 135, 147, 219, 29, 78, 243, 105, 252, 161, 14,
+    ];
+
     #[test]
     fn test_from_secret_key_0x01_0x02() {
-        let secret_key = Scalar::from_bytes_mod_order([1u8; 32]);
+        let secret_key = Scalar::from_bytes_mod_order(SCALAR_BYTES_SEED_ALICE);
         let public_key = SuiPublicKey::from_secret_key(&secret_key);
 
         assert_eq!(
-            "2HLPkZUQbkV9x1aVNMTbBL9bNi5u7rSNYmhe1budKMR2",
+            "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w=",
             public_key.to_string()
         );
 
-        let secret_key = Scalar::from_bytes_mod_order([2u8; 32]);
+        let secret_key = Scalar::from_bytes_mod_order(SCALAR_BYTES_SEED_BOB);
         let public_key = SuiPublicKey::from_secret_key(&secret_key);
+        println!("public key: {}", public_key);
 
         assert_eq!(
-            "2b8eBNt4G6UineQ2cJBRL9ncYTMgWn6SjMcsyEVgkuAE",
+            "gTl3Dqh9F19Wo1Rmw0x+zMuNipG07jeiXfYPW4/Js5Q=",
             public_key.to_string()
         )
     }
 
     #[test]
-    fn test_public_key_display_is_base58() {
-        let sk = Scalar::from_bytes_mod_order([1u8; 32]);
+    fn test_public_key_display_is_base64() {
+        let sk = Scalar::from_bytes_mod_order(SCALAR_BYTES_SEED_ALICE);
         let pk = SuiPublicKey::from_secret_key(&sk);
 
         let encoded = pk.to_string();
-        let decoded = bs58::decode(encoded).into_vec().unwrap();
+
+        let mut decoded = [0u8; 32];
+        Base64::decode(&encoded, &mut decoded).unwrap();
 
         assert_eq!(decoded, pk.0.to_bytes());
         assert_eq!(decoded.len(), 32);
@@ -89,17 +116,17 @@ mod tests {
 
     #[test]
     fn test_public_key_known_vector() {
-        let sk = Scalar::from_bytes_mod_order([1u8; 32]);
+        let sk = Scalar::from_bytes_mod_order(SCALAR_BYTES_SEED_ALICE);
         let pk = SuiPublicKey::from_secret_key(&sk);
         let addr = pk.to_address(&SuiFormat::Hex).unwrap();
 
         assert_eq!(
             pk.to_string(),
-            "2HLPkZUQbkV9x1aVNMTbBL9bNi5u7rSNYmhe1budKMR2"
+            "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w="
         );
         assert_eq!(
             addr.to_string(),
-            "0x9272473946cc1517b4b254957566d1cbd4baf10d8d16c6a5c23da5818e27d9ca"
+            "0x29dfbf688abce7ab43bb8e70cae158ae961196e721440f515482f8ba1684390f"
         );
     }
 

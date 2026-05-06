@@ -1,34 +1,42 @@
-use anyhow::{anyhow, Result};
-use base64ct::{Base64, Encoding};
-// use serde_json::json;
+use anyhow::Result;
 use sui_crypto::ed25519::Ed25519PrivateKey;
-use sui_sdk_types::{Address, StructTag};
+use sui_sdk_types::{Address, Ed25519PublicKey, StructTag};
+// use base64ct::{Base64, Encoding};
+// use serde_json::json;
 // use sui_transaction_builder::TransactionBuilder;
 
+const SEED_ALICE: [u8; 32] = [1u8; 32];
+const SEED_BOB: [u8; 32] = [2u8; 32];
+
+const ADDRESS_ALICE: &str = "0x29dfbf688abce7ab43bb8e70cae158ae961196e721440f515482f8ba1684390f";
+const ADDRESS_BOB: &str = "0x7799ea80594c35644321148485238c7a7a1c6549809e1795e6747c6d4da2504c";
+
+const PUBLIC_KEY_ALICE: &str = "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w=";
+const PUBLIC_KEY_BOB: &str = "gTl3Dqh9F19Wo1Rmw0x+zMuNipG07jeiXfYPW4/Js5Q=";
+
 fn generate_ed25519_accounts() -> Result<(Ed25519PrivateKey, Address, Address)> {
-    todo!()
+    let private_key_alice: Ed25519PrivateKey = Ed25519PrivateKey::new(SEED_ALICE);
+    let private_key_bob: Ed25519PrivateKey = Ed25519PrivateKey::new(SEED_BOB);
 
-    // let alice_seed = [1u8; 32];
-    // let bob_seed = [2u8; 32];
-    //
-    // let alice = Ed25519PrivateKey::from_bytes(&alice_seed)?;
-    // let bob = Ed25519PrivateKey::from_bytes(&bob_seed)?;
+    let public_key_alice: Ed25519PublicKey = private_key_alice.public_key();
+    let public_key_bob: Ed25519PublicKey = private_key_bob.public_key();
 
-    // TODO: find the right private key bytes and address
+    let addr_alice: Address = public_key_alice.derive_address();
+    let addr_bob: Address = public_key_bob.derive_address();
 
-    // let alice_pk = alice.public_key();
-    // let bob_pk = bob.public_key();
-    //
-    // let alice_addr = Address::from(&alice_pk);
-    // let bob_addr = Address::from(&bob_pk);
-    //
-    // println!("alice public key hex : {}", hex::encode(alice_pk.inner()));
-    // println!("alice address        : {alice_addr}");
-    //
-    // println!("bob public key hex   : {}", hex::encode(bob_pk.inner()));
-    // println!("bob address          : {bob_addr}");
-    //
-    // Ok((alice, alice_addr, bob_addr))
+    assert_eq!(ADDRESS_ALICE, addr_alice.to_string());
+    assert_eq!(ADDRESS_BOB, addr_bob.to_string());
+
+    assert_eq!(PUBLIC_KEY_ALICE, public_key_alice.to_string());
+    assert_eq!(PUBLIC_KEY_BOB, public_key_bob.to_string());
+
+    println!("alice public key: {}", public_key_alice);
+    println!("alice address        : {addr_alice}");
+
+    println!("bob public key: {}", public_key_bob);
+    println!("bo address        : {addr_bob}");
+
+    Ok((private_key_alice, addr_alice, addr_bob))
 }
 
 // async fn transfer_sui_native(
