@@ -33,6 +33,7 @@ dependencies = [
  "group",
  "hex",
  "reqwest",
+ "serde",
  "serde_json",
  "sui-crypto",
  "sui-rpc",
