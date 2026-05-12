@@ -1,5 +1,5 @@
 use anyhow::Result;
-// use base64ct::{Base64, Encoding};
+use base64ct::{Base64, Encoding};
 use bech32::{Bech32, Hrp};
 use ed25519_dalek::SigningKey;
 use sui_crypto::{ed25519::Ed25519PrivateKey, SuiSigner};
@@ -43,6 +43,78 @@ fn ed25519_to_suiprivkey(key: &[u8]) -> String {
     payload.extend_from_slice(key);
 
     bech32::encode::<Bech32>(hrp(), &payload).unwrap()
+}
+
+fn assert_transaction_props(
+    parsed_tx: &Transaction,
+    expected_sender: Address,
+    expected_recipient: Address,
+    expected_gas_obj: &ObjectReference,
+    expected_amount: u64,
+    expected_gas_price: u64,
+    expected_budget: u64,
+) {
+    // Assert sender
+    assert_eq!(parsed_tx.sender, expected_sender);
+
+    // Assert gas payment
+    assert_eq!(parsed_tx.gas_payment.objects.len(), 1);
+    let gas_obj = &parsed_tx.gas_payment.objects[0];
+    assert_eq!(gas_obj, expected_gas_obj);
+    assert_eq!(parsed_tx.gas_payment.price, expected_gas_price);
+    assert_eq!(parsed_tx.gas_payment.budget, expected_budget);
+
+    // Assert PTB
+    if let TransactionKind::ProgrammableTransaction(ptb) = &parsed_tx.kind {
+        // Assert input 0 (amount)
+        if let Input::Pure(amount_bytes) = &ptb.inputs[0] {
+            let amount: u64 = bcs::from_bytes(amount_bytes).unwrap();
+            assert_eq!(amount, expected_amount);
+        } else {
+            panic!("Expected Input::Pure for amount");
+        }
+
+        // Assert input 1 (recipient)
+        if let Input::Pure(recipient_bytes) = &ptb.inputs[1] {
+            let recipient: Address = bcs::from_bytes(recipient_bytes).unwrap();
+            assert_eq!(recipient, expected_recipient);
+        } else {
+            panic!("Expected Input::Pure for recipient");
+        }
+
+        // Assert commands
+        assert_eq!(ptb.commands.len(), 2);
+
+        if let Command::SplitCoins(split) = &ptb.commands[0] {
+            assert!(matches!(split.coin, Argument::Gas));
+            assert_eq!(split.amounts.len(), 1);
+            if let Argument::Input(idx) = split.amounts[0] {
+                assert_eq!(idx, 0);
+            } else {
+                panic!("Expected Argument::Input(0) for split amounts");
+            }
+        } else {
+            panic!("Expected Command::SplitCoins");
+        }
+
+        if let Command::TransferObjects(transfer) = &ptb.commands[1] {
+            assert_eq!(transfer.objects.len(), 1);
+            if let Argument::Result(idx) = transfer.objects[0] {
+                assert_eq!(idx, 0);
+            } else {
+                panic!("Expected Argument::Result");
+            }
+            if let Argument::Input(idx) = transfer.address {
+                assert_eq!(idx, 1);
+            } else {
+                panic!("Expected Argument::Input(1) for transfer address");
+            }
+        } else {
+            panic!("Expected Command::TransferObjects");
+        }
+    } else {
+        panic!("Expected TransactionKind::ProgrammableTransaction");
+    }
 }
 
 fn generate_ed25519_accounts() -> Result<(Ed25519PrivateKey, Address, Address)> {
@@ -134,7 +206,7 @@ async fn transfer_sui_native(
             ],
         }),
         gas_payment: GasPayment {
-            objects: vec![gas_coin_ref],
+            objects: vec![gas_coin_ref.clone()],
             owner: alice_addr,
             price: reference_gas_price,
             budget: 3_000_000,
@@ -146,10 +218,23 @@ async fn transfer_sui_native(
     let signature: UserSignature = alice.sign_transaction(&tx)?;
 
     // 4. Serialize and encode
-    // let tx_b64 = Base64::encode_string(&bcs::to_bytes(&tx)?);
-    // let sig_b64 = Base64::encode_string(&bcs::to_bytes(&signature)?);
-    // println!("transaction (base64): {tx_b64}");
-    // println!("signature (base64): {sig_b64}");
+    let tx_bytes = bcs::to_bytes(&tx)?;
+    let parsed_tx: Transaction = bcs::from_bytes(&tx_bytes)?;
+
+    assert_transaction_props(
+        &parsed_tx,
+        alice_addr,
+        bob_addr,
+        &gas_coin_ref,
+        amount,
+        reference_gas_price,
+        3_000_000,
+    );
+
+    let tx_b64 = Base64::encode_string(&tx_bytes);
+    let sig_b64 = Base64::encode_string(&bcs::to_bytes(&signature)?);
+    println!("transaction (base64): {tx_b64}");
+    println!("signature (base64): {sig_b64}");
 
     // 5. Submit via RPC
     let response = client

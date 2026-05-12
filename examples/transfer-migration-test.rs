@@ -1,0 +1,245 @@
+use anychain_sui::{
+    Input, Output, SuiAddress, SuiFormat, SuiPublicKey, SuiTransaction, SuiTransactionParameters,
+};
+const PRIVATE_KEY_BECH32_ALICE: &str =
+    "suiprivkey1qqqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszasa5uj";
+const PRIVATE_KEY_BECH32_BOB: &str =
+    "suiprivkey1qqpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyucanpq";
+
+use anychain_core::{PublicKey, Transaction};
+use anyhow::Result;
+use base64ct::{Base64, Encoding};
+use serde_json::Value;
+use std::str::FromStr;
+use sui_crypto::{ed25519::Ed25519PrivateKey, SuiSigner};
+use sui_rpc::{
+    client::Client,
+    field::{FieldMask, FieldMaskUtil},
+    proto::sui::rpc::v2::ExecuteTransactionRequest,
+};
+use sui_sdk_types::{
+    Address, Argument, Command, Input as SdkInput, ObjectReference, Transaction as SdkTransaction,
+    TransactionKind, UserSignature,
+};
+
+const ADDRESS_ALICE: &str = "0x29dfbf688abce7ab43bb8e70cae158ae961196e721440f515482f8ba1684390f";
+const ADDRESS_BOB: &str = "0x7799ea80594c35644321148485238c7a7a1c6549809e1795e6747c6d4da2504c";
+const TRANSFER_AMOUNT: u64 = 1_000_000;
+const GAS_PRICE: u64 = 1_000;
+const GAS_BUDGET: u64 = 3_000_000;
+
+const TESTNET_RPC: &str = "https://fullnode.testnet.sui.io:443";
+
+// Build the same PTB shape as the sui-rust-sdk example:
+// SplitCoins(Gas, [Input(0)]) -> TransferObjects([Result(0)], Input(1)).
+
+fn sk_to_addr(bech32_private_key: &str) -> SuiAddress {
+    let seed = suiprivkey_to_ed25519(bech32_private_key);
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
+    let pubkey = SuiPublicKey(signing_key.verifying_key());
+    pubkey.to_address(&SuiFormat::Hex).unwrap()
+}
+
+fn sk_to_pk(bech32_private_key: &str) -> [u8; 32] {
+    let seed = suiprivkey_to_ed25519(bech32_private_key);
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
+    let pubkey = SuiPublicKey(signing_key.verifying_key());
+    pubkey.0.to_bytes()
+}
+
+fn sk_to_signer(bech32_private_key: &str) -> Ed25519PrivateKey {
+    Ed25519PrivateKey::new(suiprivkey_to_ed25519(bech32_private_key))
+}
+
+fn suiprivkey_to_ed25519(key: &str) -> [u8; 32] {
+    let (hrp, data) = bech32::decode(key).expect("Invalid bech32 string");
+    assert_eq!(hrp.as_str(), "suiprivkey", "Invalid HRP");
+    assert_eq!(
+        data[0], 0x00,
+        "Invalid signature scheme flag, expected 0x00 (Ed25519)"
+    );
+    data[1..].try_into().expect("Invalid private key length")
+}
+
+fn assert_ptb_shape(
+    tx: &SdkTransaction,
+    expected_sender: &SuiAddress,
+    expected_recipient: &SuiAddress,
+) {
+    // Verify the transaction header and gas configuration.
+    assert_eq!(tx.sender.to_string(), expected_sender.to_string());
+    assert_eq!(tx.gas_payment.objects.len(), 1);
+    assert_eq!(
+        tx.gas_payment.owner.to_string(),
+        expected_sender.to_string()
+    );
+    assert_eq!(tx.gas_payment.price, GAS_PRICE);
+    assert_eq!(tx.gas_payment.budget, GAS_BUDGET);
+
+    match &tx.kind {
+        TransactionKind::ProgrammableTransaction(ptb) => {
+            // Expect a minimal PTB: 2 pure inputs and 2 commands.
+            assert_eq!(ptb.inputs.len(), 2);
+            assert_eq!(ptb.commands.len(), 2);
+
+            // Input 0 is the split amount.
+            match &ptb.inputs[0] {
+                SdkInput::Pure(bytes) => {
+                    let amount: u64 = bcs::from_bytes(bytes).unwrap();
+                    assert_eq!(amount, TRANSFER_AMOUNT);
+                }
+                other => panic!("expected pure amount input, got {other:?}"),
+            }
+
+            // Input 1 is the transfer recipient.
+            match &ptb.inputs[1] {
+                SdkInput::Pure(bytes) => {
+                    let recipient = bcs::from_bytes::<sui_sdk_types::Address>(bytes).unwrap();
+                    assert_eq!(recipient.to_string(), expected_recipient.to_string());
+                }
+                other => panic!("expected pure recipient input, got {other:?}"),
+            }
+
+            // Command 0 splits the gas coin using amount input 0.
+            assert!(matches!(
+                &ptb.commands[0],
+                Command::SplitCoins(split)
+                    if matches!(split.coin, Argument::Gas)
+                        && split.amounts == vec![Argument::Input(0)]
+            ));
+
+            // Command 1 transfers the split result to recipient input 1.
+            assert!(matches!(
+                &ptb.commands[1],
+                Command::TransferObjects(transfer)
+                    if (
+                        transfer.objects == vec![Argument::Result(0)]
+                        || transfer.objects == vec![Argument::NestedResult(0, 0)]
+                    ) && transfer.address == Argument::Input(1)
+            ));
+        }
+        other => panic!("expected programmable transaction, got {other:?}"),
+    }
+}
+
+async fn select_first_coin(owner: Address) -> Result<ObjectReference> {
+    let client = Client::new(TESTNET_RPC)?;
+    let sui_struct_tag = sui_sdk_types::StructTag::sui();
+    let coin_type = sui_sdk_types::TypeTag::Struct(Box::new(sui_struct_tag));
+    let amount: u64 = TRANSFER_AMOUNT;
+    let coins = client.select_coins(&owner, &coin_type, amount, &[]).await?;
+
+    dbg!(coins.len());
+
+    let first_coin = coins
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("No coins found for address {}", owner))?;
+    let proto_object: sui_rpc::proto::sui::rpc::v2::Object = first_coin.clone();
+    let object_ref: sui_sdk_types::ObjectReference =
+        (&proto_object.object_reference()).try_into()?;
+    Ok(object_ref)
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let alice_addr = sk_to_addr(PRIVATE_KEY_BECH32_ALICE);
+    let bob_addr = sk_to_addr(PRIVATE_KEY_BECH32_BOB);
+    let alice_public_key = sk_to_pk(PRIVATE_KEY_BECH32_ALICE);
+    let alice_signer = sk_to_signer(PRIVATE_KEY_BECH32_ALICE);
+
+    assert_eq!(alice_addr.to_string(), ADDRESS_ALICE);
+    assert_eq!(bob_addr.to_string(), ADDRESS_BOB);
+
+    println!("alice address: {alice_addr}");
+    println!("bob address: {bob_addr}");
+
+    let alice_addr_off = Address::from_str(&alice_addr.to_string()).unwrap();
+    let gas_coin_ref = select_first_coin(alice_addr_off).await?;
+    dbg!(&gas_coin_ref);
+
+    let params = SuiTransactionParameters {
+        from: alice_addr.clone(),
+        inputs: vec![],
+        outputs: vec![Output {
+            to: bob_addr.clone(),
+            amount: TRANSFER_AMOUNT,
+        }],
+        gas_payment: Input::from_object_ref(gas_coin_ref),
+        gas_price: GAS_PRICE,
+        gas_budget: GAS_BUDGET,
+        public_key: alice_public_key,
+    };
+
+    let tx = SuiTransaction::new(&params)?;
+    let raw_tx = tx.to_bytes()?;
+    let parsed_tx: SdkTransaction = bcs::from_bytes(&raw_tx)?;
+    assert_ptb_shape(&parsed_tx, &alice_addr, &bob_addr);
+
+    // Compute the transaction id for display only.
+    let txid = tx.to_transaction_id()?;
+
+    // Sign the SDK transaction directly so the signature includes the correct
+    // Sui intent message, instead of signing the txid bytes.
+    let signature: UserSignature = alice_signer.sign_transaction(&parsed_tx)?;
+
+    let raw_tx_b64 = Base64::encode_string(&raw_tx);
+    let sig_b64 = Base64::encode_string(&bcs::to_bytes(&signature)?);
+
+    let signed = serde_json::to_vec(&Value::Object(
+        [
+            ("raw_tx".to_string(), Value::String(raw_tx_b64.clone())),
+            ("signature".to_string(), Value::String(sig_b64.clone())),
+        ]
+        .into_iter()
+        .collect(),
+    ))?;
+
+    let payload = serde_json::from_slice::<Value>(&signed)?;
+    let raw_tx_b64 = payload["raw_tx"].as_str().expect("missing raw_tx");
+    let sig_b64 = payload["signature"].as_str().expect("missing signature");
+
+    assert_eq!(raw_tx_b64, Base64::encode_string(&raw_tx));
+
+    let decoded_tx_bytes = Base64::decode_vec(raw_tx_b64)?;
+    let decoded_sig_bytes = Base64::decode_vec(sig_b64)?;
+
+    let decoded_tx: SdkTransaction = bcs::from_bytes(&decoded_tx_bytes)?;
+    let decoded_signature: UserSignature = bcs::from_bytes(&decoded_sig_bytes)?;
+
+    assert_eq!(decoded_tx, parsed_tx);
+    assert_eq!(
+        bcs::to_bytes(&decoded_signature)?,
+        bcs::to_bytes(&signature)?
+    );
+
+    println!("transaction id: {}", txid);
+    println!("transaction (base64): {}", raw_tx_b64);
+    println!("signature (base64): {}", sig_b64);
+
+    // finally: Submit via RPC
+    let mut client = Client::new(TESTNET_RPC)?;
+    let response = client
+        .execute_transaction_and_wait_for_checkpoint(
+            ExecuteTransactionRequest::new(decoded_tx.into())
+                .with_signatures(vec![decoded_signature.into()])
+                .with_read_mask(FieldMask::from_str("*")),
+            std::time::Duration::from_secs(10),
+        )
+        .await?
+        .into_inner();
+
+    assert!(
+        response.transaction().effects().status().success(),
+        "transaction execution failed"
+    );
+
+    // println!("broadcast result{:?}", response);
+
+    if let Some(tx) = &response.transaction {
+        if let Some(digest) = &tx.digest {
+            println!("transaction digest: {}", digest);
+        }
+    }
+
+    Ok(())
+}

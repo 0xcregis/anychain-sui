@@ -80,7 +80,6 @@ mod tests {
 
         let secret_key = Scalar::from_bytes_mod_order(SCALAR_BYTES_SEED_BOB);
         let public_key = SuiPublicKey::from_secret_key(&secret_key);
-        println!("public key: {}", public_key);
 
         assert_eq!(
             "gTl3Dqh9F19Wo1Rmw0x+zMuNipG07jeiXfYPW4/Js5Q=",

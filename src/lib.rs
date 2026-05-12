@@ -8,4 +8,4 @@ pub use address::*;
 pub use amount::*;
 pub use format::*;
 pub use public_key::*;
-// pub use transaction::*;
+pub use transaction::*;
