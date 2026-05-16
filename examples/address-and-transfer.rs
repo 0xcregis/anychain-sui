@@ -49,7 +49,7 @@ fn assert_transaction_props(
     parsed_tx: &Transaction,
     expected_sender: Address,
     expected_recipient: Address,
-    expected_gas_obj: &ObjectReference,
+    expected_gas_objects: &[ObjectReference],
     expected_amount: u64,
     expected_gas_price: u64,
     expected_budget: u64,
@@ -58,9 +58,7 @@ fn assert_transaction_props(
     assert_eq!(parsed_tx.sender, expected_sender);
 
     // Assert gas payment
-    assert_eq!(parsed_tx.gas_payment.objects.len(), 1);
-    let gas_obj = &parsed_tx.gas_payment.objects[0];
-    assert_eq!(gas_obj, expected_gas_obj);
+    assert_eq!(parsed_tx.gas_payment.objects, expected_gas_objects);
     assert_eq!(parsed_tx.gas_payment.price, expected_gas_price);
     assert_eq!(parsed_tx.gas_payment.budget, expected_budget);
 
@@ -152,22 +150,38 @@ fn generate_ed25519_accounts() -> Result<(Ed25519PrivateKey, Address, Address)> 
     Ok((private_key_alice, addr_alice, addr_bob))
 }
 
-async fn select_first_coin(owner: Address) -> Result<ObjectReference> {
+async fn select_coins_for_payment(
+    owner: Address,
+    transfer_amount: u64,
+    gas_budget: u64,
+) -> Result<Vec<ObjectReference>> {
     let client = Client::new(TESTNET_RPC)?;
     let sui_struct_tag = sui_sdk_types::StructTag::sui();
     let coin_type = sui_sdk_types::TypeTag::Struct(Box::new(sui_struct_tag));
-    let amount: u64 = MIST_PER_SUI / 1000;
-    let coins = client.select_coins(&owner, &coin_type, amount, &[]).await?;
+    let required_amount = transfer_amount + gas_budget;
+    let coins = client
+        .select_coins(&owner, &coin_type, required_amount, &[])
+        .await?;
 
     dbg!(coins.len());
 
-    let first_coin = coins
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("No coins found for address {}", owner))?;
-    let proto_object: sui_rpc::proto::sui::rpc::v2::Object = first_coin.clone();
-    let object_ref: sui_sdk_types::ObjectReference =
-        (&proto_object.object_reference()).try_into()?;
-    Ok(object_ref)
+    if coins.is_empty() {
+        return Err(anyhow::anyhow!(
+            "No coins found for address {} covering amount {}",
+            owner,
+            required_amount
+        ));
+    }
+
+    coins
+        .into_iter()
+        .map(|coin| {
+            let proto_object: sui_rpc::proto::sui::rpc::v2::Object = coin;
+            (&proto_object.object_reference())
+                .try_into()
+                .map_err(Into::into)
+        })
+        .collect()
 }
 
 async fn transfer_sui_native(
@@ -175,18 +189,27 @@ async fn transfer_sui_native(
     alice_addr: Address,
     bob_addr: Address,
 ) -> Result<()> {
-    // 1. Get a SUI coin owned by Alice to use as gas
-    let gas_coin_ref = select_first_coin(alice_addr).await?;
-    dbg!(&gas_coin_ref);
-
     let mut client = Client::new(TESTNET_RPC)?;
     let amount: u64 = MIST_PER_SUI / 1000;
+    let gas_budget = 3_000_000;
+    let gas_coin_refs = select_coins_for_payment(alice_addr, amount, gas_budget).await?;
+    dbg!(&gas_coin_refs);
     let reference_gas_price = 1000;
     // let reference_gas_price = client.get_reference_gas_price().await?;
 
-    // 2. Build the programmable transaction:
-    //    - Split 1 SUI from the gas coin
-    //    - Transfer the new coin to Bob
+    // 2. Build the PTB using the raw Sui transaction structures.
+    //    For this example, explicit `Transaction` / `ProgrammableTransaction`
+    //    construction is preferred over a higher-level transaction builder so
+    //    the final PTB shape stays visible and deterministic for inspection.
+    //
+    //    PTB shape in this example:
+    //    - split `amount` from `Gas`
+    //    - transfer the split result to Bob
+    //
+    //    This is valid and useful for low-level PTB examples, but it is not
+    //    always the highest-level ergonomic pattern. In production code, a
+    //    builder can be safer for complex flows, while raw structs are better
+    //    when you need byte-level control and easy structure comparison.
     let tx = Transaction {
         sender: alice_addr,
         kind: TransactionKind::ProgrammableTransaction(ProgrammableTransaction {
@@ -206,10 +229,16 @@ async fn transfer_sui_native(
             ],
         }),
         gas_payment: GasPayment {
-            objects: vec![gas_coin_ref.clone()],
+            // Use the full coin set returned by `select_coins`.
+            // This matches the official API model because gas payment supports
+            // multiple objects, and it avoids assuming a single coin is large
+            // enough. That said, it is not always the most economical choice:
+            // when one sufficiently large gas coin is available, using only one
+            // object is often simpler and may reduce object churn.
+            objects: gas_coin_refs.clone(),
             owner: alice_addr,
             price: reference_gas_price,
-            budget: 3_000_000,
+            budget: gas_budget,
         },
         expiration: TransactionExpiration::None,
     };
@@ -225,10 +254,10 @@ async fn transfer_sui_native(
         &parsed_tx,
         alice_addr,
         bob_addr,
-        &gas_coin_ref,
+        &gas_coin_refs,
         amount,
         reference_gas_price,
-        3_000_000,
+        gas_budget,
     );
 
     let tx_b64 = Base64::encode_string(&tx_bytes);

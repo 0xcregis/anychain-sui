@@ -220,6 +220,43 @@ impl Transaction for SuiTransaction {
         .map_err(|e| TransactionError::Message(e.to_string()))
     }
 
+    fn from_bytes(stream: &[u8]) -> Result<Self, TransactionError> {
+        if let Ok(payload) = serde_json::from_slice::<SignedTransactionPayload>(stream) {
+            let raw_tx = Base64::decode_vec(&payload.raw_tx)
+                .map_err(|e| TransactionError::Message(e.to_string()))?;
+
+            let mut tx = Self::from_bytes(&raw_tx)?;
+
+            let signature_bytes = Base64::decode_vec(&payload.signature)
+                .map_err(|e| TransactionError::Message(e.to_string()))?;
+
+            if signature_bytes.len() != 97 {
+                return Err(TransactionError::Message(format!(
+                    "Invalid signed payload length {}",
+                    signature_bytes.len()
+                )));
+            }
+
+            if signature_bytes[0] != 0u8 {
+                return Err(TransactionError::Message(format!(
+                    "Unsupported signature scheme flag {}",
+                    signature_bytes[0]
+                )));
+            }
+
+            let mut public_key = [0u8; 32];
+            public_key.copy_from_slice(&signature_bytes[65..97]);
+
+            tx.signature = Some(signature_bytes[1..65].to_vec());
+            tx.params.public_key = public_key;
+            return Ok(tx);
+        }
+
+        let tx: OffSuiTransaction =
+            bcs::from_bytes(stream).map_err(|e| TransactionError::Message(e.to_string()))?;
+        Self::from_sui_sdk_transaction(tx, [0u8; 32], None)
+    }
+
     fn to_bytes(&self) -> Result<Vec<u8>, TransactionError> {
         let params = &self.params;
         let mut ptb_inputs = Vec::<OffSuiInput>::new();
@@ -288,43 +325,6 @@ impl Transaction for SuiTransaction {
         };
 
         bcs::to_bytes(&tx).map_err(|e| TransactionError::Message(e.to_string()))
-    }
-
-    fn from_bytes(stream: &[u8]) -> Result<Self, TransactionError> {
-        if let Ok(payload) = serde_json::from_slice::<SignedTransactionPayload>(stream) {
-            let raw_tx = Base64::decode_vec(&payload.raw_tx)
-                .map_err(|e| TransactionError::Message(e.to_string()))?;
-
-            let mut tx = Self::from_bytes(&raw_tx)?;
-
-            let signature_bytes = Base64::decode_vec(&payload.signature)
-                .map_err(|e| TransactionError::Message(e.to_string()))?;
-
-            if signature_bytes.len() != 97 {
-                return Err(TransactionError::Message(format!(
-                    "Invalid signed payload length {}",
-                    signature_bytes.len()
-                )));
-            }
-
-            if signature_bytes[0] != 0u8 {
-                return Err(TransactionError::Message(format!(
-                    "Unsupported signature scheme flag {}",
-                    signature_bytes[0]
-                )));
-            }
-
-            let mut public_key = [0u8; 32];
-            public_key.copy_from_slice(&signature_bytes[65..97]);
-
-            tx.signature = Some(signature_bytes[1..65].to_vec());
-            tx.params.public_key = public_key;
-            return Ok(tx);
-        }
-
-        let tx: OffSuiTransaction =
-            bcs::from_bytes(stream).map_err(|e| TransactionError::Message(e.to_string()))?;
-        Self::from_sui_sdk_transaction(tx, [0u8; 32], None)
     }
 
     fn to_transaction_id(&self) -> Result<Self::TransactionId, TransactionError> {

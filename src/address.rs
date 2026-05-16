@@ -6,7 +6,6 @@ use {
         str::FromStr,
     },
     curve25519_dalek::Scalar,
-    // fastcrypto::hash::{Blake2b256, HashFunction},
     sui_sdk_types::{hash::Hasher, Address as SuiAddr},
 };
 
