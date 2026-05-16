@@ -151,7 +151,8 @@ impl SuiTransaction {
             }
 
             // Accept both PTB result encodings for compatibility.
-            let matches_split_result = transfer.objects[0] == Argument::Result(command_index as u16)
+            let matches_split_result = transfer.objects[0]
+                == Argument::Result(command_index as u16)
                 || transfer.objects[0] == Argument::NestedResult(command_index as u16, 0);
             if !matches_split_result {
                 continue;
@@ -386,6 +387,7 @@ mod tests {
     use crate::{SuiAddress, SuiFormat, SuiPublicKey};
     use anychain_core::PublicKey;
     use ed25519_dalek::Signer;
+    use rand::{Rng, RngCore};
     use serde_json::Value;
 
     fn sk_to_addr(bech32_private_key: &str) -> SuiAddress {
@@ -415,6 +417,33 @@ mod tests {
         let seed = suiprivkey_to_ed25519(bech32_private_key);
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
         signing_key.sign(message).to_bytes().to_vec()
+    }
+
+    const FIXED_SK_FROM: &str =
+        "suiprivkey1qzjx78cfcqww8prl6cw569rgz3v095a5qc3kae93374nhn23r9w0xqh7628";
+
+    const FIXED_SK_TO: &str =
+        "suiprivkey1qz4geqyqpa83waxmnf2vr80qemktms0gzthy5r07j4naaettnvwpkf6swws";
+
+    fn fixed_tx_params() -> SuiTransactionParameters {
+        let from = sk_to_addr(FIXED_SK_FROM);
+        let to = sk_to_addr(FIXED_SK_TO);
+
+        SuiTransactionParameters {
+            from,
+            inputs: fixed_coins(3),
+            outputs: vec![
+                Output {
+                    to: to.clone(),
+                    amount: 10000,
+                },
+                Output { to, amount: 20000 },
+            ],
+            gas_payment: vec![fixed_coin(9)],
+            gas_price: 1250,
+            gas_budget: 5000000,
+            public_key: sk_to_pk(FIXED_SK_FROM),
+        }
     }
 
     #[test]
@@ -469,7 +498,10 @@ mod tests {
             - outputs from the programmable transaction commands/inputs
         */
         assert_eq!(decoded.sender, tx.params.from.to_raw().unwrap());
-        assert_eq!(decoded.gas_payment.objects.len(), tx.params.gas_payment.len());
+        assert_eq!(
+            decoded.gas_payment.objects.len(),
+            tx.params.gas_payment.len()
+        );
         assert_eq!(decoded.gas_payment.owner, tx.params.from.to_raw().unwrap());
         assert_eq!(decoded.gas_payment.price, gas_price);
         assert_eq!(decoded.gas_payment.budget, gas_budget);
@@ -534,5 +566,248 @@ mod tests {
             version: 37,
             digest: bs58::encode([seed + 101; 32]).into_string(),
         }
+    }
+
+    fn rand_coins(n: u8) -> Vec<Input> {
+        let mut coins = vec![];
+        for _ in 0..n {
+            let coin = rand_coin();
+            coins.push(coin);
+        }
+        coins
+    }
+
+    fn rand_outputs(n: u8) -> Vec<Output> {
+        let mut outputs = vec![];
+        for _ in 0..n {
+            let output = rand_output();
+            outputs.push(output);
+        }
+        outputs
+    }
+
+    fn rand_output() -> Output {
+        let to = rand_array();
+        let to = SuiAddress::new(to).unwrap();
+        let amount = 10_000;
+        Output { to, amount }
+    }
+
+    fn rand_coin() -> Input {
+        Input {
+            id: rand_coin_id(),
+            version: 37,
+            digest: rand_digest(),
+        }
+    }
+
+    fn rand_coin_id() -> String {
+        let n = rand_array().to_vec();
+        format!("0x{}", hex::encode(n))
+    }
+
+    fn rand_digest() -> String {
+        let n = rand_array().to_vec();
+        bs58::encode(n).into_string()
+    }
+
+    fn rand_array() -> [u8; 32] {
+        let mut rng = rand::thread_rng();
+        let mut array = [0u8; 32];
+        rng.fill(&mut array);
+        array
+    }
+
+    fn rand_u64() -> u64 {
+        let mut rng = rand::thread_rng();
+        rng.next_u64()
+    }
+
+    #[test]
+    fn test_tx_random_generated() {
+        let sk_from = "suiprivkey1qzjx78cfcqww8prl6cw569rgz3v095a5qc3kae93374nhn23r9w0xqh7628";
+        for _ in 0..5 {
+            let from = sk_to_addr(sk_from);
+            let public_key = sk_to_pk(sk_from);
+            let gas_budget = 1_000_000 + (rand_u64() % 9_000_000);
+            let gas_price = 1 + (rand_u64() % 10_000);
+            let outputs = rand_outputs(3);
+            let gas_payment = rand_coins(2);
+
+            let params = SuiTransactionParameters {
+                from,
+                inputs: rand_coins(3),
+                outputs: outputs.clone(),
+                gas_payment: gas_payment.clone(),
+                gas_price,
+                gas_budget,
+                public_key,
+            };
+
+            let mut tx = SuiTransaction::new(&params).unwrap();
+            let raw_tx = tx.to_bytes().unwrap();
+            let decoded: OffSuiTransaction = bcs::from_bytes(&raw_tx).unwrap();
+            let decoded_from_raw = SuiTransaction::from_bytes(&raw_tx).unwrap();
+
+            assert_eq!(decoded.sender, tx.params.from.to_raw().unwrap());
+            assert_eq!(decoded.gas_payment.objects.len(), gas_payment.len());
+            assert_eq!(decoded.gas_payment.owner, tx.params.from.to_raw().unwrap());
+            assert_eq!(decoded.gas_payment.price, gas_price);
+            assert_eq!(decoded.gas_payment.budget, gas_budget);
+
+            assert!(decoded_from_raw.signature.is_none());
+            assert_eq!(
+                decoded_from_raw.params.from.to_string(),
+                tx.params.from.to_string()
+            );
+            assert_eq!(decoded_from_raw.params.outputs.len(), outputs.len());
+            assert_eq!(decoded_from_raw.params.gas_payment.len(), gas_payment.len());
+            assert_eq!(decoded_from_raw.params.inputs.len(), 0);
+            assert_eq!(decoded_from_raw.params.public_key, [0u8; 32]);
+
+            for (decoded_output, expected_output) in
+                decoded_from_raw.params.outputs.iter().zip(outputs.iter())
+            {
+                assert_eq!(decoded_output.amount, expected_output.amount);
+                assert_eq!(
+                    decoded_output.to.to_string(),
+                    expected_output.to.to_string()
+                );
+            }
+
+            let txid = tx.to_transaction_id().unwrap().0;
+            let sig = sk_sign(sk_from, &txid);
+            let expected_pk = sk_to_pk(sk_from);
+
+            let signed = tx.sign(sig.clone(), 0).unwrap();
+            let payload = serde_json::from_slice::<Value>(&signed).unwrap();
+            let raw_tx_b64 = payload["raw_tx"].as_str().unwrap();
+            let sig_b64 = payload["signature"].as_str().unwrap();
+
+            assert_eq!(raw_tx_b64, Base64::encode_string(&raw_tx));
+
+            let decoded_sig = Base64::decode_vec(sig_b64).unwrap();
+            assert_eq!(decoded_sig.len(), 97);
+            assert_eq!(decoded_sig[0], 0u8);
+            assert_eq!(&decoded_sig[1..65], sig.as_slice());
+            assert_eq!(&decoded_sig[65..97], expected_pk.as_slice());
+
+            let decoded_signed = SuiTransaction::from_bytes(&signed).unwrap();
+            assert_eq!(decoded_signed.signature.unwrap(), sig);
+            assert_eq!(decoded_signed.params.public_key, expected_pk);
+        }
+    }
+
+    #[test]
+    fn test_sign_invalid_signature_length() {
+        let params = fixed_tx_params();
+        let mut tx = SuiTransaction::new(&params).unwrap();
+
+        let err = tx.sign(vec![0u8; 63], 0).unwrap_err();
+
+        assert!(err.to_string().contains("Invalid signature length 63"));
+    }
+
+    #[test]
+    fn test_to_bytes_is_raw_sdk_transaction() {
+        let params = fixed_tx_params();
+        let tx = SuiTransaction::new(&params).unwrap();
+
+        let bytes = tx.to_bytes().unwrap();
+        let decoded: OffSuiTransaction = bcs::from_bytes(&bytes).unwrap();
+
+        assert_eq!(decoded.gas_payment.price, params.gas_price);
+        assert_eq!(decoded.gas_payment.budget, params.gas_budget);
+    }
+
+    #[test]
+    fn test_from_bytes_roundtrip_with_gas_payment() {
+        let params = fixed_tx_params();
+        let tx = SuiTransaction::new(&params).unwrap();
+
+        let mut signed_tx = tx.clone();
+        let txid = signed_tx.to_transaction_id().unwrap().0.to_vec();
+        let sig = sk_sign(FIXED_SK_FROM, &txid);
+        let signed_bytes = signed_tx.sign(sig, 0).unwrap();
+
+        let signed_json: Value = serde_json::from_slice(&signed_bytes).unwrap();
+        let raw_tx = signed_json["raw_tx"].as_str().unwrap();
+        let raw_tx_bytes = Base64::decode_vec(raw_tx).unwrap();
+
+        let decoded = SuiTransaction::from_bytes(&raw_tx_bytes).unwrap();
+
+        assert_eq!(decoded.params.inputs.len(), 0);
+        assert_eq!(decoded.params.outputs.len(), 2);
+        assert_eq!(decoded.params.outputs[0].amount, 10000);
+        assert_eq!(decoded.params.outputs[1].amount, 20000);
+        assert_eq!(decoded.params.gas_payment.len(), params.gas_payment.len());
+        assert_eq!(decoded.params.gas_price, params.gas_price);
+        assert_eq!(decoded.params.gas_budget, params.gas_budget);
+    }
+
+    #[test]
+    fn test_to_bytes_without_gas_payment_errors() {
+        let mut params = fixed_tx_params();
+        params.gas_payment = vec![];
+
+        let tx = SuiTransaction::new(&params).unwrap();
+        let err = tx.to_bytes().unwrap_err();
+
+        assert!(err.to_string().contains("missing gas payment object"));
+    }
+
+    #[test]
+    fn test_from_str_invalid_json() {
+        assert!("not-json".parse::<SuiTransaction>().is_err());
+    }
+
+    #[test]
+    fn test_from_str_invalid_raw_tx_base64() {
+        let tx = r#"{"raw_tx":"%%%","signature":"abc"}"#;
+
+        assert!(tx.parse::<SuiTransaction>().is_err());
+    }
+
+    #[test]
+    fn test_input_object_ref_roundtrip() {
+        let input = fixed_coin(1);
+
+        let obj_ref = input.to_object_ref().unwrap();
+        let decoded = Input::from_object_ref(obj_ref);
+
+        assert_eq!(decoded.id, input.id);
+        assert_eq!(decoded.version, input.version);
+        assert_eq!(decoded.digest, input.digest);
+    }
+
+    #[test]
+    fn test_input_to_object_ref_invalid_object_id() {
+        let mut input = fixed_coin(1);
+        input.id = "invalid_object_id".to_string();
+
+        assert!(input.to_object_ref().is_err());
+    }
+
+    #[test]
+    fn test_input_to_object_ref_invalid_digest() {
+        let mut input = fixed_coin(1);
+        input.digest = "invalid_digest".to_string();
+
+        assert!(input.to_object_ref().is_err());
+    }
+
+    #[test]
+    fn test_signed_transaction_json_shape() {
+        let params = fixed_tx_params();
+        let mut tx = SuiTransaction::new(&params).unwrap();
+
+        let txid = tx.to_transaction_id().unwrap().0.to_vec();
+        let sig = sk_sign(FIXED_SK_FROM, &txid);
+
+        let signed = tx.sign(sig, 0).unwrap();
+        let json: Value = serde_json::from_slice(&signed).unwrap();
+
+        assert!(json["raw_tx"].as_str().is_some());
+        assert!(json["signature"].as_str().is_some());
     }
 }

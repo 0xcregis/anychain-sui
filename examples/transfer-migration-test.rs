@@ -153,7 +153,9 @@ async fn select_coins_for_payment(
         .into_iter()
         .map(|coin| {
             let proto_object: sui_rpc::proto::sui::rpc::v2::Object = coin;
-            (&proto_object.object_reference()).try_into().map_err(Into::into)
+            (&proto_object.object_reference())
+                .try_into()
+                .map_err(Into::into)
         })
         .collect()
 }
@@ -173,7 +175,8 @@ async fn main() -> Result<()> {
 
     let alice_addr_off = Address::from_str(&alice_addr.to_string()).unwrap();
     // Keep the example aligned with SuiTransaction.gas_payment: Vec<Input>.
-    let gas_coin_refs = select_coins_for_payment(alice_addr_off, TRANSFER_AMOUNT, GAS_BUDGET).await?;
+    let gas_coin_refs =
+        select_coins_for_payment(alice_addr_off, TRANSFER_AMOUNT, GAS_BUDGET).await?;
     dbg!(&gas_coin_refs);
 
     let params = SuiTransactionParameters {
