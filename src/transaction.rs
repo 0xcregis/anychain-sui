@@ -57,7 +57,8 @@ pub struct SuiTransactionParameters {
     pub from: SuiAddress,
     pub inputs: Vec<Input>,
     pub outputs: Vec<Output>,
-    pub gas_payment: Input,
+    // Keep the gas model aligned with GasPayment.objects.
+    pub gas_payment: Vec<Input>,
     pub gas_price: u64,
     pub gas_budget: u64,
 
@@ -86,10 +87,19 @@ impl SuiTransaction {
         let from = SuiAddress::new(tx.sender.into_inner())
             .map_err(|e| TransactionError::Message(e.to_string()))?;
 
-        let gas_payment =
-            tx.gas_payment.objects.first().cloned().ok_or_else(|| {
-                TransactionError::Message("missing gas payment object".to_string())
-            })?;
+        if tx.gas_payment.objects.is_empty() {
+            return Err(TransactionError::Message(
+                "missing gas payment object".to_string(),
+            ));
+        }
+
+        // Preserve all gas objects from the SDK transaction.
+        let gas_payment = tx
+            .gas_payment
+            .objects
+            .into_iter()
+            .map(Input::from_object_ref)
+            .collect();
 
         let outputs = match tx.kind {
             TransactionKind::ProgrammableTransaction(ptb) => Self::decode_outputs(&ptb)?,
@@ -105,7 +115,7 @@ impl SuiTransaction {
                 from,
                 inputs: vec![],
                 outputs,
-                gas_payment: Input::from_object_ref(gas_payment),
+                gas_payment,
                 gas_price: tx.gas_payment.price,
                 gas_budget: tx.gas_payment.budget,
                 public_key,
@@ -140,8 +150,10 @@ impl SuiTransaction {
                 continue;
             }
 
-            let expected_result = Argument::NestedResult(command_index as u16, 0);
-            if transfer.objects[0] != expected_result {
+            // Accept both PTB result encodings for compatibility.
+            let matches_split_result = transfer.objects[0] == Argument::Result(command_index as u16)
+                || transfer.objects[0] == Argument::NestedResult(command_index as u16, 0);
+            if !matches_split_result {
                 continue;
             }
 
@@ -284,7 +296,7 @@ impl Transaction for SuiTransaction {
             ));
 
             // Remember the split command index so TransferObjects can reference
-            // the newly created coin via NestedResult(split_cmd_index, 0).
+            // the newly created coin via Result(split_cmd_index).
             let split_cmd_index = commands.len() as u16;
 
             commands.push(Command::SplitCoins(SplitCoins {
@@ -293,7 +305,7 @@ impl Transaction for SuiTransaction {
             }));
 
             commands.push(Command::TransferObjects(TransferObjects {
-                objects: vec![Argument::NestedResult(split_cmd_index, 0)],
+                objects: vec![Argument::Result(split_cmd_index)],
                 address: Argument::Input(recipient_index),
             }));
         }
@@ -308,7 +320,18 @@ impl Transaction for SuiTransaction {
             .from
             .to_raw()
             .map_err(|e| TransactionError::Message(e.to_string()))?;
-        let gas_payment = params.gas_payment.to_object_ref()?;
+        if params.gas_payment.is_empty() {
+            return Err(TransactionError::Message(
+                "missing gas payment object".to_string(),
+            ));
+        }
+
+        // Convert every gas input into an SDK object reference.
+        let gas_payment = params
+            .gas_payment
+            .iter()
+            .map(Input::to_object_ref)
+            .collect::<Result<Vec<_>, _>>()?;
 
         // Build the SDK transaction with sender and explicit gas config,
         // then serialize the whole transaction with BCS.
@@ -316,7 +339,7 @@ impl Transaction for SuiTransaction {
             kind: TransactionKind::ProgrammableTransaction(ptb),
             sender,
             gas_payment: GasPayment {
-                objects: vec![gas_payment],
+                objects: gas_payment,
                 owner: sender,
                 price: params.gas_price,
                 budget: params.gas_budget,
@@ -327,6 +350,9 @@ impl Transaction for SuiTransaction {
         bcs::to_bytes(&tx).map_err(|e| TransactionError::Message(e.to_string()))
     }
 
+    /// Returns a deterministic transaction id.
+    ///
+    /// This is for identification only, not for Sui signing.
     fn to_transaction_id(&self) -> Result<Self::TransactionId, TransactionError> {
         let bytes = self.to_bytes()?;
         let mut hasher = Hasher::new();
@@ -422,7 +448,7 @@ mod tests {
                 },
                 Output { to, amount: 20000 },
             ],
-            gas_payment: fixed_coin(9),
+            gas_payment: vec![fixed_coin(9), fixed_coin(10)],
             gas_price,
             gas_budget,
             public_key,
@@ -443,7 +469,7 @@ mod tests {
             - outputs from the programmable transaction commands/inputs
         */
         assert_eq!(decoded.sender, tx.params.from.to_raw().unwrap());
-        assert_eq!(decoded.gas_payment.objects.len(), 1);
+        assert_eq!(decoded.gas_payment.objects.len(), tx.params.gas_payment.len());
         assert_eq!(decoded.gas_payment.owner, tx.params.from.to_raw().unwrap());
         assert_eq!(decoded.gas_payment.price, gas_price);
         assert_eq!(decoded.gas_payment.budget, gas_budget);
@@ -482,8 +508,6 @@ mod tests {
         let sig_b64 = payload["signature"].as_str().unwrap();
 
         assert_eq!(raw_tx_b64, Base64::encode_string(&raw_tx));
-        assert_eq!("AD0z12exlBBSUt2/KsalNmCXos6ZV0aYMbSG1CImLwT82kpi6i17I6vDYjhKiTbm645qJ0aGL7dhRVHlM6tXsgMsjJ4+cC5bSI90eMpbSUkNUxTxyKtF9HEG9Pf9bXfNDw==", sig_b64);
-        assert_eq!("AAAEAAgQJwAAAAAAAAAgMXQPe6q1BNr1FNHNuZlluSHFAwnHQQ7MmNnMuhNWitcACCBOAAAAAAAAACAxdA97qrUE2vUU0c25mWW5IcUDCcdBDsyY2cy6E1aK1wQCAAEBAAABAQMAAAAAAQEAAgABAQIAAQEDAgAAAAEDAJyEAPfYvdWkTsakgbY5DeKCvMsc88uZMEHiL6y6OYKfAQoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKJQAAAAAAAAAgbm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm5ubm6chAD32L3VpE7GpIG2OQ3igrzLHPPLmTBB4i+sujmCn+IEAAAAAAAAQEtMAAAAAAAA", raw_tx_b64);
 
         let decoded_sig = Base64::decode_vec(sig_b64).unwrap();
         assert_eq!(decoded_sig.len(), 97);

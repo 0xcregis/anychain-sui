@@ -1,3 +1,5 @@
+// This example test uses `anychain-sui` modules and functions to build,
+// encode, decode, sign, and submit a Sui transfer transaction.
 use anychain_sui::{
     Input, Output, SuiAddress, SuiFormat, SuiPublicKey, SuiTransaction, SuiTransactionParameters,
 };
@@ -65,10 +67,11 @@ fn assert_ptb_shape(
     tx: &SdkTransaction,
     expected_sender: &SuiAddress,
     expected_recipient: &SuiAddress,
+    expected_gas_objects: &[ObjectReference],
 ) {
     // Verify the transaction header and gas configuration.
     assert_eq!(tx.sender.to_string(), expected_sender.to_string());
-    assert_eq!(tx.gas_payment.objects.len(), 1);
+    assert_eq!(tx.gas_payment.objects, expected_gas_objects);
     assert_eq!(
         tx.gas_payment.owner.to_string(),
         expected_sender.to_string()
@@ -122,22 +125,37 @@ fn assert_ptb_shape(
     }
 }
 
-async fn select_first_coin(owner: Address) -> Result<ObjectReference> {
+async fn select_coins_for_payment(
+    owner: Address,
+    transfer_amount: u64,
+    gas_budget: u64,
+) -> Result<Vec<ObjectReference>> {
+    // Select enough SUI coins to cover both transfer amount and gas budget.
     let client = Client::new(TESTNET_RPC)?;
     let sui_struct_tag = sui_sdk_types::StructTag::sui();
     let coin_type = sui_sdk_types::TypeTag::Struct(Box::new(sui_struct_tag));
-    let amount: u64 = TRANSFER_AMOUNT;
-    let coins = client.select_coins(&owner, &coin_type, amount, &[]).await?;
+    let required_amount = transfer_amount + gas_budget;
+    let coins = client
+        .select_coins(&owner, &coin_type, required_amount, &[])
+        .await?;
 
     dbg!(coins.len());
 
-    let first_coin = coins
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("No coins found for address {}", owner))?;
-    let proto_object: sui_rpc::proto::sui::rpc::v2::Object = first_coin.clone();
-    let object_ref: sui_sdk_types::ObjectReference =
-        (&proto_object.object_reference()).try_into()?;
-    Ok(object_ref)
+    if coins.is_empty() {
+        return Err(anyhow::anyhow!(
+            "No coins found for address {} covering amount {}",
+            owner,
+            required_amount
+        ));
+    }
+
+    coins
+        .into_iter()
+        .map(|coin| {
+            let proto_object: sui_rpc::proto::sui::rpc::v2::Object = coin;
+            (&proto_object.object_reference()).try_into().map_err(Into::into)
+        })
+        .collect()
 }
 
 #[tokio::main]
@@ -154,8 +172,9 @@ async fn main() -> Result<()> {
     println!("bob address: {bob_addr}");
 
     let alice_addr_off = Address::from_str(&alice_addr.to_string()).unwrap();
-    let gas_coin_ref = select_first_coin(alice_addr_off).await?;
-    dbg!(&gas_coin_ref);
+    // Keep the example aligned with SuiTransaction.gas_payment: Vec<Input>.
+    let gas_coin_refs = select_coins_for_payment(alice_addr_off, TRANSFER_AMOUNT, GAS_BUDGET).await?;
+    dbg!(&gas_coin_refs);
 
     let params = SuiTransactionParameters {
         from: alice_addr.clone(),
@@ -164,7 +183,12 @@ async fn main() -> Result<()> {
             to: bob_addr.clone(),
             amount: TRANSFER_AMOUNT,
         }],
-        gas_payment: Input::from_object_ref(gas_coin_ref),
+        // Pass all selected gas objects through the anychain-sui input model.
+        gas_payment: gas_coin_refs
+            .iter()
+            .cloned()
+            .map(Input::from_object_ref)
+            .collect(),
         gas_price: GAS_PRICE,
         gas_budget: GAS_BUDGET,
         public_key: alice_public_key,
@@ -173,7 +197,7 @@ async fn main() -> Result<()> {
     let tx = SuiTransaction::new(&params)?;
     let raw_tx = tx.to_bytes()?;
     let parsed_tx: SdkTransaction = bcs::from_bytes(&raw_tx)?;
-    assert_ptb_shape(&parsed_tx, &alice_addr, &bob_addr);
+    assert_ptb_shape(&parsed_tx, &alice_addr, &bob_addr, &gas_coin_refs);
 
     // Compute the transaction id for display only.
     let txid = tx.to_transaction_id()?;
