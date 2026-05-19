@@ -302,7 +302,10 @@ impl FromStr for SuiTransaction {
 
     fn from_str(tx: &str) -> Result<Self, Self::Err> {
         let val = from_str::<Value>(tx)?;
-        let raw_tx = val["raw_tx"].as_str().unwrap();
+        let raw_tx = match val["raw_tx"].as_str() {
+            Some(s) => s,
+            None => return Err(TransactionError::Message("raw_tx not found".to_string())),
+        };
         let raw_tx = STANDARD
             .decode(raw_tx)
             .map_err(|e| TransactionError::Message(e.to_string()))?;
