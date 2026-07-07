@@ -11,9 +11,9 @@ use sui_rpc::{
 };
 use sui_sdk_types::{Address, Ed25519PublicKey};
 use sui_sdk_types::{
-    Argument, Command, Digest, GasPayment, Input, ObjectReference, ProgrammableTransaction,
-    SplitCoins, StructTag, Transaction, TransactionExpiration, TransactionKind, TransferObjects,
-    TypeTag, UserSignature,
+    Argument, Command, Digest, GasPayment, Input, MergeCoins, ObjectReference,
+    ProgrammableTransaction, SplitCoins, StructTag, Transaction, TransactionExpiration,
+    TransactionKind, TransferObjects, TypeTag, UserSignature,
 };
 const SEED_ALICE: [u8; 32] = [1u8; 32];
 const SEED_BOB: [u8; 32] = [2u8; 32];
@@ -33,7 +33,7 @@ const PUBLIC_KEY_ALICE: &str = "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w=";
 const PUBLIC_KEY_BOB: &str = "gTl3Dqh9F19Wo1Rmw0x+zMuNipG07jeiXfYPW4/Js5Q=";
 
 const TESTNET_RPC: &str = "https://fullnode.testnet.sui.io:443";
-const MIST_PER_SUI: u64 = 1_000_000_000;
+// const MIST_PER_SUI: u64 = 1_000_000_000;
 const SUI_PRIVKEY_HRP: &str = "suiprivkey";
 
 // TODO: replace with Testnet USDC Package
@@ -79,13 +79,6 @@ fn object_ref_from_rpc(coin: sui_rpc::proto::sui::rpc::v2::Object) -> Result<Obj
     Ok(object_ref)
 }
 
-fn first_object(objects: Vec<ObjectReference>) -> Result<ObjectReference> {
-    objects
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("empty object list"))
-}
-
 fn print_tx(tx: &Transaction, sig: &UserSignature) -> Result<()> {
     let tx_bytes = bcs::to_bytes(tx)?;
 
@@ -99,7 +92,7 @@ fn print_tx(tx: &Transaction, sig: &UserSignature) -> Result<()> {
     Ok(())
 }
 
-fn generate_ed25519_accounts() -> Result<(Ed25519PrivateKey, Address, Address)> {
+fn generate_ed25519_accounts() -> Result<(Ed25519PrivateKey, Address, Ed25519PrivateKey, Address)> {
     let private_key_alice: Ed25519PrivateKey = Ed25519PrivateKey::new(SEED_ALICE);
     let signing_key_alice: SigningKey = ed25519_dalek::SigningKey::from_bytes(&SEED_ALICE);
     let private_key_bech32_alice = ed25519_to_suiprivkey(signing_key_alice.as_bytes().as_slice());
@@ -131,7 +124,7 @@ fn generate_ed25519_accounts() -> Result<(Ed25519PrivateKey, Address, Address)> 
     println!("bob public key: {}", public_key_bob);
     println!("bob address: {addr_bob}");
 
-    Ok((private_key_alice, addr_alice, addr_bob))
+    Ok((private_key_alice, addr_alice, private_key_bob, addr_bob))
 }
 
 async fn select_coin_objects(
@@ -183,6 +176,78 @@ async fn get_coin_balance(
         .ok_or_else(|| anyhow::anyhow!("missing balance for {owner} ({coin_type})"))
 }
 
+struct CoinTransferPlan {
+    inputs: Vec<Input>,
+    commands: Vec<Command>,
+    source_coin: Argument,
+}
+
+impl CoinTransferPlan {
+    fn from_inputs(inputs: Vec<Input>) -> Result<Self> {
+        if inputs.is_empty() {
+            return Err(anyhow::anyhow!("coin not found"));
+        }
+
+        let mut commands = Vec::new();
+
+        if inputs.len() > 1 {
+            commands.push(Command::MergeCoins(MergeCoins {
+                coin: Argument::Input(0),
+                coins_to_merge: (1..inputs.len())
+                    .map(|index| Argument::Input(index as u16))
+                    .collect(),
+            }));
+        }
+
+        Ok(Self {
+            inputs,
+            commands,
+            source_coin: Argument::Input(0),
+        })
+    }
+
+    fn from_owned_coins(coins: Vec<ObjectReference>) -> Result<Self> {
+        Self::from_inputs(coins.into_iter().map(Input::ImmutableOrOwned).collect())
+    }
+
+    fn from_reservation(reservation: Input) -> Result<Self> {
+        Self::from_inputs(vec![reservation])
+    }
+
+    fn from_mixed_sources(reservation: Input, coins: Vec<ObjectReference>) -> Result<Self> {
+        let mut inputs = vec![reservation];
+        inputs.extend(coins.into_iter().map(Input::ImmutableOrOwned));
+        Self::from_inputs(inputs)
+    }
+}
+
+async fn coin_reservation_input(owner: Address, coin_type: &TypeTag, amount: u64) -> Result<Input> {
+    let mut client = Client::new(TESTNET_RPC)?;
+    let service_info = client
+        .ledger_client()
+        .get_service_info(sui_rpc::proto::sui::rpc::v2::GetServiceInfoRequest::default())
+        .await?
+        .into_inner();
+
+    let epoch = service_info
+        .epoch
+        .ok_or_else(|| anyhow::anyhow!("missing epoch in service info"))?;
+    let chain_id = service_info
+        .chain_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("missing chain id in service info"))?;
+    let chain_id = Digest::from_str(chain_id)?;
+    let coin_struct = coin_struct_tag(coin_type)?;
+
+    Ok(Input::ImmutableOrOwned(ObjectReference::coin_reservation(
+        &coin_struct,
+        amount,
+        epoch,
+        chain_id,
+        owner,
+    )))
+}
+
 /// Builds the programmable-transaction input used as the transferable coin source.
 ///
 /// Sui can store fungible balances in two forms for an address:
@@ -192,47 +257,77 @@ async fn get_coin_balance(
 /// When the requested amount is already available in `address_balance`, this
 /// function creates a synthetic reservation object via `coin_reservation` so
 /// the transfer can spend that balance even if no concrete `Coin<T>` object is
-/// present on-chain for the owner. Otherwise it falls back to selecting a real
-/// owned coin object and uses that object as the input.
+/// present on-chain for the owner.
+///
+/// Otherwise it selects concrete owned `Coin<T>` objects:
+/// - one coin => split that object directly
+/// - multiple coins => merge them first, then split the merged primary coin
+/// - if neither side alone is enough, reserve the missing address balance and
+///   merge it with the owned coins before splitting
 async fn coin_input_for_transfer(
     owner: Address,
     coin_type: &TypeTag,
     amount: u64,
-) -> Result<Input> {
+) -> Result<CoinTransferPlan> {
     let balance = get_coin_balance(owner, coin_type).await?;
+    let total_balance = balance.balance.unwrap_or_default();
     let address_balance = balance.address_balance.unwrap_or_default();
+    let coin_balance = balance.coin_balance.unwrap_or_default();
 
-    if address_balance >= amount {
-        let mut client = Client::new(TESTNET_RPC)?;
-        let service_info = client
-            .ledger_client()
-            .get_service_info(sui_rpc::proto::sui::rpc::v2::GetServiceInfoRequest::default())
-            .await?
-            .into_inner();
+    let combined_balance = address_balance
+        .checked_add(coin_balance)
+        .ok_or_else(|| anyhow::anyhow!("balance overflow for {owner} ({coin_type})"))?;
 
-        let epoch = service_info
-            .epoch
-            .ok_or_else(|| anyhow::anyhow!("missing epoch in service info"))?;
-        let chain_id = service_info
-            .chain_id
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("missing chain id in service info"))?;
-        let chain_id = Digest::from_str(chain_id)?;
-        let coin_struct = coin_struct_tag(coin_type)?;
-
-        println!("using address balance reservation for {owner} ({coin_type}), amount={amount}");
-
-        return Ok(Input::ImmutableOrOwned(ObjectReference::coin_reservation(
-            &coin_struct,
-            amount,
-            epoch,
-            chain_id,
-            owner,
-        )));
+    if combined_balance < amount {
+        return Err(anyhow::anyhow!(
+            "insufficient total balance for {owner} ({coin_type}): total_balance={total_balance}, address_balance={address_balance}, coin_balance={coin_balance}, required={amount}"
+        ));
     }
 
-    let coin_ref = first_object(select_coin_objects(owner, coin_type.clone(), amount).await?)?;
-    Ok(Input::ImmutableOrOwned(coin_ref))
+    if address_balance >= amount {
+        println!("using address balance reservation for {owner} ({coin_type}), amount={amount}");
+
+        return CoinTransferPlan::from_reservation(
+            coin_reservation_input(owner, coin_type, amount).await?,
+        );
+    }
+
+    if coin_balance >= amount {
+        let coin_refs = select_coin_objects(owner, coin_type.clone(), amount).await?;
+
+        if coin_refs.len() == 1 {
+            println!("using single owned coin object for {owner} ({coin_type}), amount={amount}");
+        } else {
+            println!(
+                "using {} owned coin objects for {owner} ({coin_type}), amount={amount}",
+                coin_refs.len()
+            );
+        }
+
+        return CoinTransferPlan::from_owned_coins(coin_refs);
+    }
+
+    let reservation_amount = amount
+        .checked_sub(coin_balance)
+        .ok_or_else(|| anyhow::anyhow!("coin balance unexpectedly exceeds amount"))?;
+
+    let owned_coin_refs = select_coin_objects(owner, coin_type.clone(), coin_balance).await?;
+
+    if owned_coin_refs.is_empty() {
+        return Err(anyhow::anyhow!(
+            "coin balance reported as {coin_balance}, but no owned coin objects were found for {owner} ({coin_type})"
+        ));
+    }
+
+    println!(
+        "using address balance reservation ({reservation_amount}) + {} owned coin objects for {owner} ({coin_type}), amount={amount}",
+        owned_coin_refs.len()
+    );
+
+    CoinTransferPlan::from_mixed_sources(
+        coin_reservation_input(owner, coin_type, reservation_amount).await?,
+        owned_coin_refs,
+    )
 }
 
 async fn transfer_coin_partial(
@@ -248,38 +343,35 @@ async fn transfer_coin_partial(
         "transfer({}, {}, {}, {})",
         sender, recipient, coin_type, amount
     );
-    let coin_input = coin_input_for_transfer(sender, &coin_type, amount).await?;
-    // dbg!(&coin_input);
+    let coin_plan = coin_input_for_transfer(sender, &coin_type, amount).await?;
 
     let gas_budget = 3_000_000;
 
     let gas_objects = select_gas_coins(sender, gas_budget).await?;
-    // dbg!(&gas_objects);
 
     let gas_price = client.get_reference_gas_price().await?;
+    let amount_input_index = coin_plan.inputs.len() as u16;
+    let recipient_input_index = amount_input_index + 1;
+    let split_command_index = coin_plan.commands.len() as u16;
+    let mut inputs = coin_plan.inputs;
+    inputs.push(Input::Pure(bcs::to_bytes(&amount)?));
+    inputs.push(Input::Pure(bcs::to_bytes(&recipient)?));
+    let mut commands = coin_plan.commands;
+    commands.push(Command::SplitCoins(SplitCoins {
+        coin: coin_plan.source_coin,
+        amounts: vec![Argument::Input(amount_input_index)],
+    }));
+    commands.push(Command::TransferObjects(TransferObjects {
+        objects: vec![Argument::Result(split_command_index)],
+        address: Argument::Input(recipient_input_index),
+    }));
 
     let tx = Transaction {
         sender,
 
         kind: TransactionKind::ProgrammableTransaction(ProgrammableTransaction {
-            inputs: vec![
-                coin_input,
-                Input::Pure(bcs::to_bytes(&amount)?),
-                Input::Pure(bcs::to_bytes(&recipient)?),
-            ],
-
-            commands: vec![
-                Command::SplitCoins(SplitCoins {
-                    coin: Argument::Input(0),
-
-                    amounts: vec![Argument::Input(1)],
-                }),
-                Command::TransferObjects(TransferObjects {
-                    objects: vec![Argument::Result(0)],
-
-                    address: Argument::Input(2),
-                }),
-            ],
+            inputs,
+            commands,
         }),
 
         gas_payment: GasPayment {
@@ -331,12 +423,12 @@ async fn transfer_usdc(
 
 async fn query_coin_balance(owner: Address, coin_type: TypeTag) -> Result<()> {
     let balance = get_coin_balance(owner, &coin_type).await?;
-    let total = balance.balance.unwrap_or_default();
+    let total_balance = balance.balance.unwrap_or_default();
     let address_balance = balance.address_balance.unwrap_or_default();
     let coin_balance = balance.coin_balance.unwrap_or_default();
 
     println!(
-        "balance for {owner} ({coin_type}): total={total}, address_balance={address_balance}, coin_balance={coin_balance}"
+        "balance for {owner} ({coin_type}): total_balance={total_balance}, address_balance={address_balance}, coin_balance={coin_balance}"
     );
 
     Ok(())
@@ -378,21 +470,22 @@ fn display_amount_to_base_units(metadata: &CoinMetadata, amount: f64) -> Result<
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // let (alice, alice_addr, bob_addr) = generate_ed25519_accounts()?;
+    let (alice, alice_addr, bob, bob_addr) = generate_ed25519_accounts()?;
 
     let metadata = get_coin_metadata(&mut Client::new(TESTNET_RPC)?, usdc_type_tag()).await?;
 
-    // println!("--- balances before transfer ---");
-    // query_coin_balance(alice_addr, usdc_type_tag()).await?;
-    // query_coin_balance(bob_addr, usdc_type_tag()).await?;
+    println!("--- balances before transfer ---");
+    query_coin_balance(alice_addr, usdc_type_tag()).await?;
+    query_coin_balance(bob_addr, usdc_type_tag()).await?;
 
-    let usdc_transfer_amount = display_amount_to_base_units(&metadata, 0.1)?; // 0.1 USDC
+    let display_amount = 0.15;
+    let usdc_transfer_amount = display_amount_to_base_units(&metadata, display_amount)?; // 0.1 USDC
     println!(
-        "0.1 {} in base units = {}",
-        metadata.symbol.as_deref().unwrap_or("coin"),
-        usdc_transfer_amount
+        "{} in base units = {}",
+        display_amount, usdc_transfer_amount
     );
     // transfer_usdc(&alice, alice_addr, bob_addr, usdc_transfer_amount).await?;
+    transfer_usdc(&bob, bob_addr, alice_addr, usdc_transfer_amount).await?;
 
     // println!("--- balances after transfer ---");
     // query_coin_balance(alice_addr, usdc_type_tag()).await?;
