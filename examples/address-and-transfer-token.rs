@@ -11,9 +11,9 @@ use sui_rpc::{
 };
 use sui_sdk_types::{Address, Ed25519PublicKey};
 use sui_sdk_types::{
-    Argument, Command, GasPayment, Input, ObjectReference, ProgrammableTransaction, SplitCoins,
-    StructTag, Transaction, TransactionExpiration, TransactionKind, TransferObjects, TypeTag,
-    UserSignature,
+    Argument, Command, Digest, GasPayment, Input, ObjectReference, ProgrammableTransaction,
+    SplitCoins, StructTag, Transaction, TransactionExpiration, TransactionKind, TransferObjects,
+    TypeTag, UserSignature,
 };
 const SEED_ALICE: [u8; 32] = [1u8; 32];
 const SEED_BOB: [u8; 32] = [2u8; 32];
@@ -37,7 +37,8 @@ const MIST_PER_SUI: u64 = 1_000_000_000;
 const SUI_PRIVKEY_HRP: &str = "suiprivkey";
 
 // TODO: replace with Testnet USDC Package
-const USDC_PACKAGE_ID: &str = "0xa1ec7fc00a6f40db9693ad1415d0c193ad3906494428cf252621037bd7117e29";
+const USDC_PACKAGE_ID_TESTNET: &str =
+    "0xa1ec7fc00a6f40db9693ad1415d0c193ad3906494428cf252621037bd7117e29::usdc::USDC";
 // 1 USDC = 1_000_000
 
 fn hrp() -> Hrp {
@@ -54,13 +55,22 @@ fn ed25519_to_suiprivkey(key: &[u8]) -> String {
 }
 
 fn usdc_type_tag() -> TypeTag {
-    let tag = format!("0x2::coin::Coin<{}::usdc::USDC>", USDC_PACKAGE_ID);
-
-    TypeTag::Struct(Box::new(StructTag::from_str(&tag).unwrap()))
+    TypeTag::Struct(Box::new(
+        StructTag::from_str(&USDC_PACKAGE_ID_TESTNET).unwrap(),
+    ))
 }
 
 fn sui_coin_type() -> TypeTag {
     TypeTag::Struct(Box::new(StructTag::sui()))
+}
+
+fn coin_struct_tag(coin_type: &TypeTag) -> Result<StructTag> {
+    match coin_type {
+        TypeTag::Struct(tag) => Ok(tag.as_ref().clone()),
+        _ => Err(anyhow::anyhow!(
+            "coin type must be a struct tag: {coin_type}"
+        )),
+    }
 }
 
 fn object_ref_from_rpc(coin: sui_rpc::proto::sui::rpc::v2::Object) -> Result<ObjectReference> {
@@ -152,6 +162,79 @@ async fn select_gas_coins(owner: Address, gas_budget: u64) -> Result<Vec<ObjectR
     select_coin_objects(owner, sui_coin_type(), gas_budget).await
 }
 
+async fn get_coin_balance(
+    owner: Address,
+    coin_type: &TypeTag,
+) -> Result<sui_rpc::proto::sui::rpc::v2::Balance> {
+    let mut client = Client::new(TESTNET_RPC)?;
+
+    let mut request = sui_rpc::proto::sui::rpc::v2::GetBalanceRequest::default();
+    request.owner = Some(owner.to_string());
+    request.coin_type = Some(coin_type.to_string());
+
+    let response = client
+        .state_client()
+        .get_balance(request)
+        .await?
+        .into_inner();
+
+    response
+        .balance
+        .ok_or_else(|| anyhow::anyhow!("missing balance for {owner} ({coin_type})"))
+}
+
+/// Builds the programmable-transaction input used as the transferable coin source.
+///
+/// Sui can store fungible balances in two forms for an address:
+/// 1. as owned `Coin<T>` objects (`coin_balance`)
+/// 2. as aggregated address balance (`address_balance`)
+///
+/// When the requested amount is already available in `address_balance`, this
+/// function creates a synthetic reservation object via `coin_reservation` so
+/// the transfer can spend that balance even if no concrete `Coin<T>` object is
+/// present on-chain for the owner. Otherwise it falls back to selecting a real
+/// owned coin object and uses that object as the input.
+async fn coin_input_for_transfer(
+    owner: Address,
+    coin_type: &TypeTag,
+    amount: u64,
+) -> Result<Input> {
+    let balance = get_coin_balance(owner, coin_type).await?;
+    let address_balance = balance.address_balance.unwrap_or_default();
+
+    if address_balance >= amount {
+        let mut client = Client::new(TESTNET_RPC)?;
+        let service_info = client
+            .ledger_client()
+            .get_service_info(sui_rpc::proto::sui::rpc::v2::GetServiceInfoRequest::default())
+            .await?
+            .into_inner();
+
+        let epoch = service_info
+            .epoch
+            .ok_or_else(|| anyhow::anyhow!("missing epoch in service info"))?;
+        let chain_id = service_info
+            .chain_id
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("missing chain id in service info"))?;
+        let chain_id = Digest::from_str(chain_id)?;
+        let coin_struct = coin_struct_tag(coin_type)?;
+
+        println!("using address balance reservation for {owner} ({coin_type}), amount={amount}");
+
+        return Ok(Input::ImmutableOrOwned(ObjectReference::coin_reservation(
+            &coin_struct,
+            amount,
+            epoch,
+            chain_id,
+            owner,
+        )));
+    }
+
+    let coin_ref = first_object(select_coin_objects(owner, coin_type.clone(), amount).await?)?;
+    Ok(Input::ImmutableOrOwned(coin_ref))
+}
+
 async fn transfer_coin_partial(
     signer: &Ed25519PrivateKey,
     sender: Address,
@@ -161,15 +244,17 @@ async fn transfer_coin_partial(
 ) -> Result<()> {
     let mut client = Client::new(TESTNET_RPC)?;
 
-    // Coin<T>
-    let coin_ref = first_object(select_coin_objects(sender, coin_type, amount).await?)?;
+    println!(
+        "transfer({}, {}, {}, {})",
+        sender, recipient, coin_type, amount
+    );
+    let coin_input = coin_input_for_transfer(sender, &coin_type, amount).await?;
+    dbg!(&coin_input);
 
-    //
-    // Gas Coin<SUI>
-    //
     let gas_budget = 3_000_000;
 
     let gas_objects = select_gas_coins(sender, gas_budget).await?;
+    dbg!(&gas_objects);
 
     let gas_price = client.get_reference_gas_price().await?;
 
@@ -178,7 +263,7 @@ async fn transfer_coin_partial(
 
         kind: TransactionKind::ProgrammableTransaction(ProgrammableTransaction {
             inputs: vec![
-                Input::Object(coin_ref.into()),
+                coin_input,
                 Input::Pure(bcs::to_bytes(&amount)?),
                 Input::Pure(bcs::to_bytes(&recipient)?),
             ],
@@ -244,12 +329,32 @@ async fn transfer_usdc(
     transfer_coin_partial(signer, sender, recipient, usdc_type_tag(), amount).await
 }
 
+async fn query_coin_balance(owner: Address, coin_type: TypeTag) -> Result<()> {
+    let balance = get_coin_balance(owner, &coin_type).await?;
+    let total = balance.balance.unwrap_or_default();
+    let address_balance = balance.address_balance.unwrap_or_default();
+    let coin_balance = balance.coin_balance.unwrap_or_default();
+
+    println!(
+        "balance for {owner} ({coin_type}): total={total}, address_balance={address_balance}, coin_balance={coin_balance}"
+    );
+
+    Ok(())
+}
 #[tokio::main]
 async fn main() -> Result<()> {
     let (alice, alice_addr, bob_addr) = generate_ed25519_accounts()?;
 
+    println!("--- balances before transfer ---");
+    query_coin_balance(alice_addr, usdc_type_tag()).await?;
+    query_coin_balance(bob_addr, usdc_type_tag()).await?;
+
     let usdc_transfer_amount: u64 = 100_000; // 0.1 USDC
     transfer_usdc(&alice, alice_addr, bob_addr, usdc_transfer_amount).await?;
+
+    println!("--- balances after transfer ---");
+    query_coin_balance(alice_addr, usdc_type_tag()).await?;
+    query_coin_balance(bob_addr, usdc_type_tag()).await?;
 
     Ok(())
 }
