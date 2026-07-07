@@ -7,7 +7,7 @@ use sui_crypto::{ed25519::Ed25519PrivateKey, SuiSigner};
 use sui_rpc::{
     client::Client,
     field::{FieldMask, FieldMaskUtil},
-    proto::sui::rpc::v2::ExecuteTransactionRequest,
+    proto::sui::rpc::v2::{CoinMetadata, ExecuteTransactionRequest, GetCoinInfoRequest},
 };
 use sui_sdk_types::{Address, Ed25519PublicKey};
 use sui_sdk_types::{
@@ -249,12 +249,12 @@ async fn transfer_coin_partial(
         sender, recipient, coin_type, amount
     );
     let coin_input = coin_input_for_transfer(sender, &coin_type, amount).await?;
-    dbg!(&coin_input);
+    // dbg!(&coin_input);
 
     let gas_budget = 3_000_000;
 
     let gas_objects = select_gas_coins(sender, gas_budget).await?;
-    dbg!(&gas_objects);
+    // dbg!(&gas_objects);
 
     let gas_price = client.get_reference_gas_price().await?;
 
@@ -341,20 +341,62 @@ async fn query_coin_balance(owner: Address, coin_type: TypeTag) -> Result<()> {
 
     Ok(())
 }
+
+async fn get_coin_metadata(client: &mut Client, coin_type: TypeTag) -> Result<CoinMetadata> {
+    let response = client
+        .state_client()
+        .get_coin_info(GetCoinInfoRequest::default().with_coin_type(coin_type.to_string()))
+        .await?
+        .into_inner();
+    let metadata = response
+        .metadata
+        .ok_or_else(|| anyhow::anyhow!("missing coin metadata for {coin_type}"))?;
+
+    println!(
+        "coin metadata for {coin_type}: decimals={}, symbol={}, name={}",
+        metadata.decimals.unwrap_or_default(),
+        metadata.symbol.as_deref().unwrap_or(""),
+        metadata.name.as_deref().unwrap_or(""),
+    );
+
+    Ok(metadata)
+}
+
+fn display_amount_to_base_units(metadata: &CoinMetadata, amount: f64) -> Result<u64> {
+    // 10^decimals / 10
+    let decimals = metadata
+        .decimals
+        .ok_or_else(|| anyhow::anyhow!("coin metadata is missing decimals"))?;
+    let scale = 10u64
+        .checked_pow(decimals)
+        .ok_or_else(|| anyhow::anyhow!("decimals too large for u64 amount: {decimals}"))?;
+
+    let base_units = (amount * scale as f64) as u64;
+
+    Ok(base_units)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    let (alice, alice_addr, bob_addr) = generate_ed25519_accounts()?;
+    // let (alice, alice_addr, bob_addr) = generate_ed25519_accounts()?;
 
-    println!("--- balances before transfer ---");
-    query_coin_balance(alice_addr, usdc_type_tag()).await?;
-    query_coin_balance(bob_addr, usdc_type_tag()).await?;
+    let metadata = get_coin_metadata(&mut Client::new(TESTNET_RPC)?, usdc_type_tag()).await?;
 
-    let usdc_transfer_amount: u64 = 100_000; // 0.1 USDC
-    transfer_usdc(&alice, alice_addr, bob_addr, usdc_transfer_amount).await?;
+    // println!("--- balances before transfer ---");
+    // query_coin_balance(alice_addr, usdc_type_tag()).await?;
+    // query_coin_balance(bob_addr, usdc_type_tag()).await?;
 
-    println!("--- balances after transfer ---");
-    query_coin_balance(alice_addr, usdc_type_tag()).await?;
-    query_coin_balance(bob_addr, usdc_type_tag()).await?;
+    let usdc_transfer_amount = display_amount_to_base_units(&metadata, 0.1)?; // 0.1 USDC
+    println!(
+        "0.1 {} in base units = {}",
+        metadata.symbol.as_deref().unwrap_or("coin"),
+        usdc_transfer_amount
+    );
+    // transfer_usdc(&alice, alice_addr, bob_addr, usdc_transfer_amount).await?;
+
+    // println!("--- balances after transfer ---");
+    // query_coin_balance(alice_addr, usdc_type_tag()).await?;
+    // query_coin_balance(bob_addr, usdc_type_tag()).await?;
 
     Ok(())
 }
