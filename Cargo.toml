@@ -28,3 +28,4 @@ rand = "0.8.6"
 sui-crypto = { version = "0.3.0", features = ["ed25519", "passkey", "pem"] }
 sui-rpc = { version = "0.3.1" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+sui-transaction-builder = { version = "0.3.1" }
