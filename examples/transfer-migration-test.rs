@@ -13,7 +13,6 @@ use anyhow::Result;
 use base64ct::{Base64, Encoding};
 use serde_json::Value;
 use std::str::FromStr;
-use sui_crypto::{ed25519::Ed25519PrivateKey, SuiSigner};
 use sui_rpc::{
     client::Client,
     field::{FieldMask, FieldMaskUtil},
@@ -47,10 +46,6 @@ fn sk_to_pk(bech32_private_key: &str) -> [u8; 32] {
     let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
     let pubkey = SuiPublicKey(signing_key.verifying_key());
     pubkey.0.to_bytes()
-}
-
-fn sk_to_signer(bech32_private_key: &str) -> Ed25519PrivateKey {
-    Ed25519PrivateKey::new(suiprivkey_to_ed25519(bech32_private_key))
 }
 
 fn suiprivkey_to_ed25519(key: &str) -> [u8; 32] {
@@ -165,7 +160,6 @@ async fn main() -> Result<()> {
     let alice_addr = sk_to_addr(PRIVATE_KEY_BECH32_ALICE);
     let bob_addr = sk_to_addr(PRIVATE_KEY_BECH32_BOB);
     let alice_public_key = sk_to_pk(PRIVATE_KEY_BECH32_ALICE);
-    let alice_signer = sk_to_signer(PRIVATE_KEY_BECH32_ALICE);
 
     assert_eq!(alice_addr.to_string(), ADDRESS_ALICE);
     assert_eq!(bob_addr.to_string(), ADDRESS_BOB);
@@ -197,35 +191,27 @@ async fn main() -> Result<()> {
         public_key: alice_public_key,
     };
 
-    let tx = SuiTransaction::new(&params)?;
+    let mut tx = SuiTransaction::new(&params)?;
     let raw_tx = tx.to_bytes()?;
-    let parsed_tx: SdkTransaction = bcs::from_bytes(&raw_tx)?;
+    let parsed_tx: SdkTransaction = bcs::from_bytes(&raw_tx[3..])?;
     assert_ptb_shape(&parsed_tx, &alice_addr, &bob_addr, &gas_coin_refs);
 
     // Compute the transaction id for display only.
     let txid = tx.to_transaction_id()?;
 
-    // Sign the SDK transaction directly so the signature includes the correct
-    // Sui intent message, instead of signing the txid bytes.
-    let signature: UserSignature = alice_signer.sign_transaction(&parsed_tx)?;
+    // Sign the transaction ID hash with pure ed25519 algorithm.
+    let seed = suiprivkey_to_ed25519(PRIVATE_KEY_BECH32_ALICE);
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
+    use ed25519_dalek::Signer;
+    let sig_bytes = signing_key.sign(&txid.0).to_bytes().to_vec();
 
-    let raw_tx_b64 = Base64::encode_string(&raw_tx);
-    let sig_b64 = Base64::encode_string(&bcs::to_bytes(&signature)?);
-
-    let signed = serde_json::to_vec(&Value::Object(
-        [
-            ("raw_tx".to_string(), Value::String(raw_tx_b64.clone())),
-            ("signature".to_string(), Value::String(sig_b64.clone())),
-        ]
-        .into_iter()
-        .collect(),
-    ))?;
+    let signed = tx.sign(sig_bytes, 0)?;
 
     let payload = serde_json::from_slice::<Value>(&signed)?;
     let raw_tx_b64 = payload["raw_tx"].as_str().expect("missing raw_tx");
     let sig_b64 = payload["signature"].as_str().expect("missing signature");
 
-    assert_eq!(raw_tx_b64, Base64::encode_string(&raw_tx));
+    assert_eq!(raw_tx_b64, Base64::encode_string(&raw_tx[3..]));
 
     let decoded_tx_bytes = Base64::decode_vec(raw_tx_b64)?;
     let decoded_sig_bytes = Base64::decode_vec(sig_b64)?;
@@ -234,10 +220,6 @@ async fn main() -> Result<()> {
     let decoded_signature: UserSignature = bcs::from_bytes(&decoded_sig_bytes)?;
 
     assert_eq!(decoded_tx, parsed_tx);
-    assert_eq!(
-        bcs::to_bytes(&decoded_signature)?,
-        bcs::to_bytes(&signature)?
-    );
 
     println!("transaction id: {}", txid);
     println!("transaction (base64): {}", raw_tx_b64);

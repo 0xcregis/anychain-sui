@@ -56,7 +56,7 @@ fn ed25519_to_suiprivkey(key: &[u8]) -> String {
 
 fn usdc_type_tag() -> TypeTag {
     TypeTag::Struct(Box::new(
-        StructTag::from_str(&USDC_PACKAGE_ID_TESTNET).unwrap(),
+        StructTag::from_str(USDC_PACKAGE_ID_TESTNET).unwrap(),
     ))
 }
 
@@ -470,7 +470,7 @@ fn display_amount_to_base_units(metadata: &CoinMetadata, amount: f64) -> Result<
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let (alice, alice_addr, bob, bob_addr) = generate_ed25519_accounts()?;
+    let (_, alice_addr, bob, bob_addr) = generate_ed25519_accounts()?;
 
     let metadata = get_coin_metadata(&mut Client::new(TESTNET_RPC)?, usdc_type_tag()).await?;
 
