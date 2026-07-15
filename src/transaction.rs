@@ -709,4 +709,33 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn test_coin_reservation_conversion() {
+        use sui_sdk_types::{Address, Digest, ObjectReference, StructTag};
+        let coin_struct = StructTag::sui();
+        let amount = 1000u64;
+        let epoch = 10u64;
+        let chain_id = Digest::new([0; 32]);
+        let owner =
+            Address::from_str("0x0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+
+        let obj = ObjectReference::coin_reservation(&coin_struct, amount, epoch, chain_id, owner);
+
+        let input = Input::from_object_ref(obj.clone());
+        println!("Input: {:?}", input);
+
+        let converted = input.to_object_ref();
+        println!("Converted: {:?}", converted);
+
+        match converted {
+            Ok(conv) => {
+                assert_eq!(obj, conv);
+            }
+            Err(e) => {
+                panic!("Failed to convert: {:?}", e);
+            }
+        }
+    }
 }
